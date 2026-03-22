@@ -21,7 +21,7 @@ import java.util.Arrays;
  */
 public abstract class DensoTable {
 
-    private static final float MIN_MAC_MULTIPLIER = 1e-5f;
+    private static final float MIN_MAC_MULTIPLIER = 1e-7f;
     private static final float MAX_MAC_MULTIPLIER = 1e6f;
 
     /** ROM address of the table header (in Ghidra address space). */
@@ -112,7 +112,7 @@ public abstract class DensoTable {
         if (!Float.isFinite(multiplier) ||
                 Math.abs(multiplier) < MIN_MAC_MULTIPLIER ||
                 Math.abs(multiplier) > MAX_MAC_MULTIPLIER) {
-            return "Multiplier must be finite and within [1e-5, 1e6].";
+            return "Multiplier must be finite and within [1e-7, 1e6].";
         }
         if (!Float.isFinite(offset)) {
             return "Offset must be a finite value.";

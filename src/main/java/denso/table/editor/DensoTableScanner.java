@@ -38,16 +38,52 @@ public final class DensoTableScanner {
 
     // ------- tunable constants -----------------------------------------------
 
-    /** Minimum plausible axis entry count (1-entry tables are constants, not lookup tables). */
-    private static final int MIN_COUNT = 2;
+    /** Minimum plausible axis entry count. Some valid calibrations are scalar 1x1 maps. */
+    private static final int MIN_COUNT = 1;
     /** Maximum plausible axis entry count (anything larger is almost certainly garbage). */
     private static final int MAX_COUNT = 250;
 
     private static final int MIN_POINTER_DISTANCE = 0x100;
+    private static final int[] AMBIGUOUS_1D_NEIGHBOR_OFFSETS = { -20, -12, 12, 20 };
+    private static final int[] AMBIGUOUS_2D_NEIGHBOR_OFFSETS = { -28, -20, 20, 28 };
+    private static final int LOCAL_DESCRIPTOR_SCAN_BYTES = 0x100;
 
     // -------------------------------------------------------------------------
 
     private DensoTableScanner() {}
+
+    private static final class OneDHeaderPattern {
+        final int count;
+        final int typeCode;
+        final long ptrX;
+        final long ptrY;
+
+        OneDHeaderPattern(int count, int typeCode, long ptrX, long ptrY) {
+            this.count = count;
+            this.typeCode = typeCode;
+            this.ptrX = ptrX;
+            this.ptrY = ptrY;
+        }
+    }
+
+    private static final class TwoDHeaderPattern {
+        final int countX;
+        final int countY;
+        final int typeCode;
+        final long ptrX;
+        final long ptrY;
+        final long ptrZ;
+
+        TwoDHeaderPattern(int countX, int countY, int typeCode,
+                long ptrX, long ptrY, long ptrZ) {
+            this.countX = countX;
+            this.countY = countY;
+            this.typeCode = typeCode;
+            this.ptrX = ptrX;
+            this.ptrY = ptrY;
+            this.ptrZ = ptrZ;
+        }
+    }
 
     // =========================================================================
     // Public API
@@ -154,7 +190,6 @@ public final class DensoTableScanner {
         if ((buf[off + 17] | buf[off + 18] | buf[off + 19]) != 0) return null;
 
         if (!DensoTableType.fromCode(typeCode).isValid()) return null;
-        DensoTableType dtype = DensoTableType.fromCode(typeCode);
 
         long headerAddr = blockStartOff + off;
         if (!isValidPointer(ptrX, headerAddr, memory, space)) return null;
@@ -174,12 +209,16 @@ public final class DensoTableScanner {
             }
         }
 
-        // Read axis arrays — both must be finite and strictly increasing
+        // Read axis arrays — both must be finite and ordered
         float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
         if (valuesX == null || !isMonotonicFinite(valuesX)) return null;
 
         float[] valuesY = readFloatArrayFromMemory(memory, space, ptrY, countY);
         if (valuesY == null || !isMonotonicFinite(valuesY)) return null;
+
+        DensoTableType dtype = resolve2DDataType(buf, off, blockStartOff,
+                countX, countY, typeCode, ptrX, ptrY, ptrZ, hasMAC, memory, space);
+        if (dtype == null) return null;
 
         double[][] valuesZ = readDataMatrix(memory, space, ptrZ, countX, countY, dtype);
         if (valuesZ == null) return null;
@@ -213,6 +252,46 @@ public final class DensoTableScanner {
         return t;
     }
 
+    private static DensoTableType resolve2DDataType(byte[] buf, int off,
+            long blockStartOff, int countX, int countY, int typeCode,
+            long ptrX, long ptrY, long ptrZ, boolean hasMAC,
+            Memory memory, AddressSpace space) {
+        DensoTableType declared = DensoTableType.fromCode(typeCode);
+        if (!declared.isValid()) {
+            return null;
+        }
+
+        if (!hasMAC && typeCode == DensoTableType.FLOAT.getCode()) {
+            DensoTableType inferred = inferPacked2DDataType(buf, off, blockStartOff,
+                    countX, countY, ptrX, ptrY, ptrZ, memory, space);
+            if (inferred != null) {
+                return inferred;
+            }
+        }
+
+        return declared;
+    }
+
+    private static DensoTableType inferPacked2DDataType(byte[] buf, int off,
+            long blockStartOff, int countX, int countY, long ptrX, long ptrY, long ptrZ,
+            Memory memory, AddressSpace space) {
+        long nextPtr = findNextLocalDataPointer(buf, off, blockStartOff, ptrZ,
+                memory, space);
+        if (nextPtr == Long.MAX_VALUE) {
+            return null;
+        }
+
+        long zStride = nextPtr - ptrZ;
+        if (matchesCompactPayloadStride(zStride, countX * countY)) {
+            return DensoTableType.UINT8;
+        }
+        if (matchesCompactPayloadStride(zStride,
+                countX * countY * DensoTableType.UINT16.getValueSize())) {
+            return DensoTableType.UINT16;
+        }
+        return null;
+    }
+
     /** Attempts to parse a 1-D table header at {@code buf[offset]}. */
     private static DensoTable1D tryParse1D(byte[] buf, int off,
             long blockStartOff, Memory memory, AddressSpace space) {
@@ -225,7 +304,6 @@ public final class DensoTableScanner {
         if ((buf[off + 3] & 0xFF) != 0) return null;
 
         if (!DensoTableType.fromCode(typeCode).isValid()) return null;
-        DensoTableType dtype = DensoTableType.fromCode(typeCode);
 
         long ptrX = readInt32BE(buf, off + 4);
         long ptrY = readInt32BE(buf, off + 8);
@@ -247,9 +325,13 @@ public final class DensoTableScanner {
             }
         }
 
-        // X axis must be finite and strictly increasing
+        // X axis must be finite and ordered
         float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
         if (valuesX == null || !isMonotonicFinite(valuesX)) return null;
+
+        DensoTableType dtype = resolve1DDataType(buf, off, blockStartOff, countX,
+                typeCode, ptrX, ptrY, hasMAC, memory, space);
+        if (dtype == null) return null;
 
         double[] valuesY = readDataArray1D(memory, space, ptrY, countX, dtype);
         if (valuesY == null) return null;
@@ -278,6 +360,295 @@ public final class DensoTableScanner {
         return t;
     }
 
+    private static DensoTableType resolve1DDataType(byte[] buf, int off,
+            long blockStartOff, int countX, int typeCode, long ptrX, long ptrY,
+            boolean hasMAC, Memory memory, AddressSpace space) {
+        DensoTableType declared = DensoTableType.fromCode(typeCode);
+        if (!declared.isValid()) {
+            return null;
+        }
+
+        // Some no-MAC 1-D descriptors use a compact payload layout where 0x00 does
+        // not actually mean 4-byte float data. Infer that from neighboring headers
+        // and pointer spacing before falling back to the nominal float decode.
+        if (!hasMAC && typeCode == DensoTableType.FLOAT.getCode()) {
+            DensoTableType inferred = inferPacked1DDataType(buf, off, blockStartOff,
+                    countX, ptrX, ptrY, memory, space);
+            if (inferred != null) {
+                return inferred;
+            }
+
+            if (hasWeakFloatPayload(memory, space, ptrY, countX)) {
+                DensoTableType aligned = inferAlignedIntegerDataType(memory, space,
+                        ptrY, countX);
+                if (aligned != null) {
+                    return aligned;
+                }
+            }
+        }
+
+        return declared;
+    }
+
+    private static DensoTableType inferPacked1DDataType(byte[] buf, int off,
+            long blockStartOff, int countX, long ptrX, long ptrY,
+            Memory memory, AddressSpace space) {
+        long nextPtr = findNextLocalDataPointer(buf, off, blockStartOff, ptrY,
+                memory, space);
+        long yStride = nextPtr == Long.MAX_VALUE ? Long.MAX_VALUE : nextPtr - ptrY;
+        if (matchesCompactPayloadStride(yStride, countX)) {
+            return DensoTableType.UINT8;
+        }
+        if (matchesCompactPayloadStride(yStride,
+                countX * DensoTableType.UINT16.getValueSize())) {
+            return DensoTableType.UINT16;
+        }
+
+        for (int delta : AMBIGUOUS_1D_NEIGHBOR_OFFSETS) {
+            OneDHeaderPattern sibling = read1DHeaderPattern(buf, off + delta,
+                    blockStartOff, memory, space);
+            if (sibling == null || sibling.count != countX) {
+                continue;
+            }
+
+            long xStride = Math.abs(sibling.ptrX - ptrX);
+            if (xStride != countX * 4L) {
+                continue;
+            }
+
+            long siblingYStride = Math.abs(sibling.ptrY - ptrY);
+            DensoTableType siblingType = DensoTableType.fromCode(sibling.typeCode);
+
+            if (siblingType.isValid()
+                    && sibling.typeCode != DensoTableType.FLOAT.getCode()
+                    && siblingYStride == countX * (long) siblingType.getValueSize()) {
+                return siblingType;
+            }
+
+            if (siblingYStride == countX) {
+                return DensoTableType.UINT8;
+            }
+            if (siblingYStride == countX * 2L) {
+                return DensoTableType.UINT16;
+            }
+        }
+
+        return null;
+    }
+
+    private static boolean hasWeakFloatPayload(Memory memory, AddressSpace space,
+            long ptrY, int countX) {
+        double[] valuesY = readDataArray1D(memory, space, ptrY, countX,
+                DensoTableType.FLOAT);
+        if (valuesY == null) {
+            return true;
+        }
+
+        int plausibleCount = 0;
+        int longestRun = 0;
+        int currentRun = 0;
+        for (double v : valuesY) {
+            if (isPlausibleCalibrationFloat(v)) {
+                plausibleCount++;
+                currentRun++;
+                longestRun = Math.max(longestRun, currentRun);
+            }
+            else {
+                currentRun = 0;
+            }
+        }
+
+        return plausibleCount <= countX / 4 && longestRun < 3;
+    }
+
+    private static DensoTableType inferAlignedIntegerDataType(Memory memory,
+            AddressSpace space, long ptrY, int countX) {
+        if (hasAlignedIntegerSlots(memory, space, ptrY, countX,
+                DensoTableType.UINT16.getValueSize())) {
+            return DensoTableType.UINT16;
+        }
+        if (hasAlignedIntegerSlots(memory, space, ptrY, countX,
+                DensoTableType.UINT8.getValueSize())) {
+            return DensoTableType.UINT8;
+        }
+        return null;
+    }
+
+    private static boolean hasAlignedIntegerSlots(Memory memory, AddressSpace space,
+            long ptr, int count, int elemSize) {
+        int payloadSize = count * elemSize;
+        int alignedSize = alignTo4(payloadSize);
+        if (alignedSize == payloadSize) {
+            return false;
+        }
+
+        int slotsToCheck = 2;
+        byte[] raw = readBytesFromMemory(memory, space, ptr, alignedSize * slotsToCheck);
+        if (raw == null) {
+            raw = readBytesFromMemory(memory, space, ptr, alignedSize);
+            slotsToCheck = raw == null ? 0 : 1;
+        }
+        if (raw == null || slotsToCheck == 0) {
+            return false;
+        }
+
+        int paddingOffset = payloadSize;
+        int paddingLength = alignedSize - payloadSize;
+        boolean sawNonZeroValue = false;
+
+        for (int slot = 0; slot < slotsToCheck; slot++) {
+            int slotOff = slot * alignedSize;
+            for (int i = 0; i < payloadSize; i++) {
+                if (raw[slotOff + i] != 0) {
+                    sawNonZeroValue = true;
+                    break;
+                }
+            }
+            for (int i = 0; i < paddingLength; i++) {
+                if (raw[slotOff + paddingOffset + i] != 0) {
+                    return false;
+                }
+            }
+        }
+
+        return sawNonZeroValue;
+    }
+
+    private static int alignTo4(int size) {
+        return (size + 3) & ~3;
+    }
+
+    private static boolean matchesCompactPayloadStride(long actualStride,
+            int payloadSize) {
+        return actualStride == payloadSize || actualStride == alignTo4(payloadSize);
+    }
+
+    private static long findNextLocalDataPointer(byte[] buf, int off,
+            long blockStartOff, long ptr, Memory memory, AddressSpace space) {
+        long nextPtr = Long.MAX_VALUE;
+
+        for (int delta : AMBIGUOUS_1D_NEIGHBOR_OFFSETS) {
+            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, off + delta,
+                    blockStartOff, ptr, memory, space));
+        }
+        for (int delta : AMBIGUOUS_2D_NEIGHBOR_OFFSETS) {
+            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, off + delta,
+                    blockStartOff, ptr, memory, space));
+        }
+
+        int scanStart = Math.max(0, off - LOCAL_DESCRIPTOR_SCAN_BYTES);
+        int scanEnd = Math.min(buf.length - 12, off + LOCAL_DESCRIPTOR_SCAN_BYTES);
+        for (int neighborOff = scanStart; neighborOff <= scanEnd; neighborOff += 4) {
+            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, neighborOff,
+                    blockStartOff, ptr, memory, space));
+        }
+
+        return nextPtr;
+    }
+
+    private static long nextHigherLocalDataPointer(byte[] buf, int off,
+            long blockStartOff, long ptr, Memory memory, AddressSpace space) {
+        long nextPtr = Long.MAX_VALUE;
+
+        OneDHeaderPattern oneD = read1DHeaderPattern(buf, off, blockStartOff,
+                memory, space);
+        if (oneD != null) {
+            if (oneD.ptrX > ptr) {
+                nextPtr = Math.min(nextPtr, oneD.ptrX);
+            }
+            if (oneD.ptrY > ptr) {
+                nextPtr = Math.min(nextPtr, oneD.ptrY);
+            }
+        }
+
+        TwoDHeaderPattern twoD = read2DHeaderPattern(buf, off, blockStartOff,
+                memory, space);
+        if (twoD != null) {
+            if (twoD.ptrX > ptr) {
+                nextPtr = Math.min(nextPtr, twoD.ptrX);
+            }
+            if (twoD.ptrY > ptr) {
+                nextPtr = Math.min(nextPtr, twoD.ptrY);
+            }
+            if (twoD.ptrZ > ptr) {
+                nextPtr = Math.min(nextPtr, twoD.ptrZ);
+            }
+        }
+
+        return nextPtr;
+    }
+
+    private static OneDHeaderPattern read1DHeaderPattern(byte[] buf, int off,
+            long blockStartOff, Memory memory, AddressSpace space) {
+        if (off < 0 || off + 12 > buf.length) {
+            return null;
+        }
+
+        int countX = readInt16BE(buf, off);
+        int typeCode = buf[off + 2] & 0xFF;
+        if (!isValidCount(countX) || (buf[off + 3] & 0xFF) != 0) {
+            return null;
+        }
+
+        if (!DensoTableType.fromCode(typeCode).isValid()) {
+            return null;
+        }
+
+        long ptrX = readInt32BE(buf, off + 4);
+        long ptrY = readInt32BE(buf, off + 8);
+        long headerAddr = blockStartOff + off;
+        if (!isValidPointer(ptrX, headerAddr, memory, space)
+                || !isValidPointer(ptrY, headerAddr, memory, space)) {
+            return null;
+        }
+
+        float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
+        if (valuesX == null || !isMonotonicFinite(valuesX)) {
+            return null;
+        }
+
+        return new OneDHeaderPattern(countX, typeCode, ptrX, ptrY);
+    }
+
+    private static TwoDHeaderPattern read2DHeaderPattern(byte[] buf, int off,
+            long blockStartOff, Memory memory, AddressSpace space) {
+        if (off < 0 || off + 20 > buf.length) {
+            return null;
+        }
+
+        int countX = readInt16BE(buf, off);
+        int countY = readInt16BE(buf, off + 2);
+        int typeCode = buf[off + 16] & 0xFF;
+        if (!isValidCount(countX) || !isValidCount(countY)) {
+            return null;
+        }
+        if ((buf[off + 17] | buf[off + 18] | buf[off + 19]) != 0) {
+            return null;
+        }
+        if (!DensoTableType.fromCode(typeCode).isValid()) {
+            return null;
+        }
+
+        long ptrX = readInt32BE(buf, off + 4);
+        long ptrY = readInt32BE(buf, off + 8);
+        long ptrZ = readInt32BE(buf, off + 12);
+        long headerAddr = blockStartOff + off;
+        if (!isValidPointer(ptrX, headerAddr, memory, space)
+                || !isValidPointer(ptrY, headerAddr, memory, space)
+                || !isValidPointer(ptrZ, headerAddr, memory, space)) {
+            return null;
+        }
+
+        float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
+        float[] valuesY = readFloatArrayFromMemory(memory, space, ptrY, countY);
+        if (valuesX == null || valuesY == null
+                || !isMonotonicFinite(valuesX) || !isMonotonicFinite(valuesY)) {
+            return null;
+        }
+
+        return new TwoDHeaderPattern(countX, countY, typeCode, ptrX, ptrY, ptrZ);
+    }
+
     // =========================================================================
     // Memory I/O
     // =========================================================================
@@ -297,6 +668,19 @@ public final class DensoTableScanner {
                 out[i] = readFloatBE(raw, i * 4);
             }
             return out;
+        }
+        catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static byte[] readBytesFromMemory(Memory mem, AddressSpace space,
+            long ptr, int size) {
+        try {
+            Address addr = space.getAddress(ptr);
+            byte[] raw = new byte[size];
+            mem.getBytes(addr, raw);
+            return raw;
         }
         catch (Exception e) {
             return null;
@@ -382,30 +766,39 @@ public final class DensoTableScanner {
 
     /**
      * Returns true for MAC multiplier values that are plausible for ECU calibration.
-     * Real multipliers are human-chosen scale factors (e.g. 0.00457, 0.1, 1.0, 2.5, 100).
-     * Values outside [1e-5, 1e6] are either subnormal noise or misread ROM bytes.
+     * Real multipliers are human-chosen scale factors (e.g. 9.536743e-7, 0.00457,
+     * 0.1, 1.0, 2.5, 100). Values outside [1e-7, 1e6] are either noise or
+     * misread ROM bytes.
      */
     private static boolean isPlausibleMultiplier(float v) {
         return DensoTable.validateMacParameters(v, 0.0f) == null;
     }
 
     /**
-     * Upper bound on any plausible calibration axis value.
-     * Legitimate ECU breakpoints (RPM, temperature, pressure, load, …) are always
-     * well below this; the large values that slip through from misread ROM pointers
-     * (e.g. 4.9e36) are not.
+     * Upper bound on any plausible calibration float.
+     * Legitimate ECU breakpoints and table values (RPM, temperature, pressure, load, …)
+     * are always well below this; the huge values that slip through from misread ROM
+     * bytes (e.g. 4.9e36) are not.
      */
     private static final float MAX_AXIS_VALUE = 1e9f;
 
     /**
+     * Minimum magnitude for a meaningful non-zero calibration float.
+     * Values down near 1e-38 commonly come from byte-filled arrays such as 0x01010101
+     * or 0x02020202 being misread as floats, not from real calibration data.
+     */
+    private static final double MIN_NON_ZERO_CALIBRATION_FLOAT = 1e-20;
+
+    /**
      * Returns true if every value is finite, within a plausible calibration range,
-     * not subnormal (unless zero), and the array is strictly increasing.
-     * All real calibration axes must satisfy this — random memory almost never will.
+     * not subnormal (unless zero), and the array is monotonic non-decreasing.
+     * Duplicate breakpoints do occur in real calibrations, so only descending axes
+     * are rejected.
      */
     private static boolean isMonotonicFinite(float[] arr) {
         for (int i = 0; i < arr.length; i++) {
             if (!isPlausibleCalibrationFloat(arr[i])) return false;
-            if (i > 0 && arr[i] <= arr[i - 1]) return false;
+            if (i > 0 && arr[i] < arr[i - 1]) return false;
         }
         return true;
     }
@@ -413,8 +806,10 @@ public final class DensoTableScanner {
     private static boolean isPlausibleCalibrationFloat(double v) {
         if (!Double.isFinite(v)) return false;
         if (Math.abs(v) > MAX_AXIS_VALUE) return false;
-        // Subnormal non-zero values are almost always misread bytes, not real table data.
-        return v == 0.0 || Math.abs(v) >= Float.MIN_NORMAL;
+        if (v == 0.0) return true;
+        // Subnormal and vanishingly small normals are almost always misread bytes.
+        return Math.abs(v) >= Float.MIN_NORMAL
+                && Math.abs(v) >= MIN_NON_ZERO_CALIBRATION_FLOAT;
     }
 
     private static boolean isValidCount(int count) {
