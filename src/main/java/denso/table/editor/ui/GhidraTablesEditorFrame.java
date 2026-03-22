@@ -27,38 +27,17 @@ import ghidra.util.Msg;
  * A standalone pop-out window for viewing and editing a single Denso
  * calibration table.
  *
- * <h3>Layout</h3>
- * <pre>
- *  ┌── Info bar ────────────────────────────────────────────────────┐
- *  │  Name  │  0xADDR (click → navigate)  │  1D │ 16x1 │ Float │ MAC│
- *  ├── Table (scrollable, heat-map) ────────────────────────────────┤
- *  │  Data values shown as physical (raw × scale + offset).        │
- *  │  Scroll wheel: ±1  Shift: ±10  Ctrl: ±0.1  Ctrl+Shift: ±0.01 │
- *  ├── Edit ops strip ──────────────────────────────────────────────┤
- *  │  [Interpolate]  [Smooth]  [Smooth ×3]                         │
- *  ├── MAC strip (only when table has MAC) ─────────────────────────┤
- *  │  MAC  Scale × [mult]  Offset + [off]  →  expression           │
- *  ├── Action bar ──────────────────────────────────────────────────┤
- *  │  [Save to ROM] [Revert] [Export CSV] [Apply Structure]  status │
- *  └────────────────────────────────────────────────────────────────┘
- * </pre>
- *
  * <p>Values in the model are stored as <em>raw</em> ROM values.
  * The MAC (scale × offset) is applied on display and inverted on edit.
  * Editing MAC fields updates header parameters without touching raw data.
  */
 public class GhidraTablesEditorFrame extends JFrame {
 
-    // ── Colours ───────────────────────────────────────────────────────────────
-    private static final Color INFO_BAR_BG   = new Color(28, 36, 48);
-    private static final Color ACTION_BAR_BG = new Color(22, 30, 42);
-    private static final Color EDIT_OPS_BG   = new Color(24, 33, 46);
-    private static final Color INFO_FG       = new Color(190, 210, 230);
-    private static final Color DIM_FG        = new Color(120, 150, 190);
-    private static final Color ACCENT        = new Color(60, 130, 220);
-    private static final Color TABLE_BG      = new Color(18, 24, 36);
-    private static final Color GRID_COLOR    = new Color(50, 60, 75);
-    private static final Color MAC_BG        = new Color(30, 40, 54);
+    // ── Theme-derived fonts ───────────────────────────────────────────────────
+    private static final Font UI_FONT        = GhidraTheme.tableFont();
+    private static final Font UI_FONT_SMALL  = GhidraTheme.smallFont();
+    private static final Font UI_FONT_BOLD   = GhidraTheme.boldFont();
+    private static final Font UI_FONT_TITLE  = GhidraTheme.titleFont();
 
     // ── Model ─────────────────────────────────────────────────────────────────
     private final DensoTable table;
@@ -74,6 +53,7 @@ public class GhidraTablesEditorFrame extends JFrame {
     private MultiEditTableCellEditor editor;
 
     private JLabel statusLabel;
+    private JLabel selectionSummaryLabel;
     private JButton saveBtn;
     private JButton revertBtn;
 
@@ -104,7 +84,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         });
 
         setLayout(new BorderLayout());
-        setBackground(TABLE_BG);
+        setBackground(GhidraTheme.panelBackground());
 
         add(buildInfoBar(),     BorderLayout.NORTH);
         add(buildCenterPanel(), BorderLayout.CENTER);
@@ -129,19 +109,23 @@ public class GhidraTablesEditorFrame extends JFrame {
     // =========================================================================
 
     private JPanel buildInfoBar() {
-        JPanel bar = new JPanel(new BorderLayout(10, 0));
-        bar.setBackground(INFO_BAR_BG);
+        JPanel bar = new JPanel(new BorderLayout(16, 0));
+        bar.setBackground(GhidraTheme.surfaceBackground());
         bar.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(0, 0, 1, 0, GRID_COLOR),
-                BorderFactory.createEmptyBorder(6, 10, 6, 10)));
+                BorderFactory.createMatteBorder(0, 0, 1, 0, GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(10, 12, 10, 12)));
+
+        JPanel titleBox = new JPanel();
+        titleBox.setOpaque(false);
+        titleBox.setLayout(new BoxLayout(titleBox, BoxLayout.Y_AXIS));
 
         JLabel nameLabel = new JLabel(table.getName());
-        nameLabel.setForeground(INFO_FG);
-        nameLabel.setFont(new Font(Font.MONOSPACED, Font.BOLD, 13));
+        nameLabel.setForeground(GhidraTheme.primaryForeground());
+        nameLabel.setFont(UI_FONT_TITLE);
 
         JLabel addrLabel = new JLabel(table.getAddressHex());
-        addrLabel.setForeground(new Color(110, 180, 255));
-        addrLabel.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        addrLabel.setForeground(GhidraTheme.linkForeground());
+        addrLabel.setFont(GhidraTheme.labelFont());
         addrLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         addrLabel.setToolTipText("Click to navigate in Ghidra  |  Right-click for menu");
 
@@ -157,38 +141,37 @@ public class GhidraTablesEditorFrame extends JFrame {
             @Override public void mouseReleased(MouseEvent e) { if (e.isPopupTrigger()) popup.show(addrLabel, e.getX(), e.getY()); }
         });
 
-        JPanel center = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
-        center.setOpaque(false);
-        center.add(addrLabel);
+        JLabel subtitle = new JLabel("Raw values are stored in ROM; displayed values apply MAC.");
+        subtitle.setForeground(GhidraTheme.secondaryForeground());
+        subtitle.setFont(UI_FONT_SMALL);
+
+        titleBox.add(nameLabel);
+        titleBox.add(Box.createVerticalStrut(4));
+        titleBox.add(addrLabel);
+        titleBox.add(Box.createVerticalStrut(3));
+        titleBox.add(subtitle);
 
         JPanel chips = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
         chips.setOpaque(false);
-        chips.add(makeChip(table.is2D() ? "2D" : "1D",           new Color(100, 60, 200)));
-        chips.add(makeChip(table.getDimensions(),                 ACCENT));
-        chips.add(makeChip(table.getDataType().getDisplayName(), new Color(40, 150, 130)));
-        if (table.isHasMAC()) chips.add(makeChip("MAC", new Color(170, 100, 30)));
+        chips.add(makeChip(table.is2D() ? "2D" : "1D"));
+        chips.add(makeChip(table.getDimensions()));
+        chips.add(makeChip(table.getDataType().getDisplayName()));
+        if (table.isHasMAC()) chips.add(makeChip("MAC"));
 
-        bar.add(nameLabel, BorderLayout.WEST);
-        bar.add(center,    BorderLayout.CENTER);
-        bar.add(chips,     BorderLayout.EAST);
+        bar.add(titleBox, BorderLayout.WEST);
+        bar.add(chips,    BorderLayout.EAST);
         return bar;
     }
 
-    private JLabel makeChip(String text, Color bg) {
-        JLabel chip = new JLabel(" " + text + " ") {
-            @Override protected void paintComponent(Graphics g) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g2.setColor(bg);
-                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 10, 10);
-                g2.dispose();
-                super.paintComponent(g);
-            }
-        };
-        chip.setFont(new Font("Dialog", Font.BOLD, 11));
-        chip.setForeground(Color.WHITE);
-        chip.setOpaque(false);
-        chip.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
+    private JLabel makeChip(String text) {
+        JLabel chip = new JLabel(" " + text + " ");
+        chip.setFont(UI_FONT_SMALL.deriveFont(Font.BOLD));
+        chip.setForeground(GhidraTheme.primaryForeground());
+        chip.setOpaque(true);
+        chip.setBackground(GhidraTheme.cardBackground());
+        chip.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(2, 5, 2, 5)));
         return chip;
     }
 
@@ -198,58 +181,37 @@ public class GhidraTablesEditorFrame extends JFrame {
 
     private JPanel buildActionBar() {
         JPanel bar = new JPanel(new BorderLayout(8, 0));
-        bar.setBackground(ACTION_BAR_BG);
+        bar.setBackground(GhidraTheme.surfaceBackground());
         bar.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(1, 0, 0, 0, GRID_COLOR),
-                BorderFactory.createEmptyBorder(5, 10, 5, 10)));
+                BorderFactory.createMatteBorder(1, 0, 0, 0, GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(7, 10, 7, 10)));
 
-        JPanel btns = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        JPanel btns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         btns.setOpaque(false);
 
-        saveBtn   = makeBtn("Save to ROM", new Color(50, 160, 70),  e -> applyChanges());
-        revertBtn = makeBtn("Revert",      new Color(180, 80,  30), e -> revertChanges());
-        JButton exportBtn = makeBtn("Export CSV",      new Color(55, 95, 190), e -> exportCsv());
-        JButton structBtn = makeBtn("Apply Structure", new Color(80, 50, 140), e -> createStructure());
+        saveBtn   = makeBtn("Save to ROM", e -> applyChanges());
+        revertBtn = makeBtn("Revert", e -> revertChanges());
 
         saveBtn.setEnabled(false);
         revertBtn.setEnabled(false);
 
         btns.add(saveBtn);
         btns.add(revertBtn);
-        btns.add(Box.createHorizontalStrut(6));
-        btns.add(exportBtn);
-        btns.add(structBtn);
 
-        statusLabel = new JLabel("Ready");
-        statusLabel.setForeground(DIM_FG);
-        statusLabel.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        statusLabel = new JLabel("Ready to edit");
+        statusLabel.setForeground(GhidraTheme.primaryForeground());
+        statusLabel.setFont(GhidraTheme.labelFont());
 
-        bar.add(btns,        BorderLayout.WEST);
-        bar.add(statusLabel, BorderLayout.EAST);
+        bar.add(statusLabel, BorderLayout.WEST);
+        bar.add(btns,        BorderLayout.EAST);
         return bar;
     }
 
-    private JButton makeBtn(String label, Color accent, ActionListener al) {
-        JButton btn = new JButton(label) {
-            @Override protected void paintComponent(Graphics g) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                Color c = !isEnabled()            ? accent.darker().darker()
-                        : getModel().isPressed()  ? accent.darker()
-                        : getModel().isRollover() ? accent.brighter()
-                        : accent;
-                g2.setColor(c);
-                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 8, 8);
-                g2.dispose();
-                super.paintComponent(g);
-            }
-        };
-        btn.setForeground(Color.WHITE);
-        btn.setFont(new Font("Dialog", Font.BOLD, 12));
-        btn.setContentAreaFilled(false);
-        btn.setBorderPainted(false);
+    private JButton makeBtn(String label, ActionListener al) {
+        JButton btn = new JButton(label);
+        btn.setFont(UI_FONT_BOLD);
         btn.setFocusPainted(false);
-        btn.setBorder(BorderFactory.createEmptyBorder(4, 12, 4, 12));
+        btn.setMargin(new Insets(4, 12, 4, 12));
         btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         btn.addActionListener(al);
         return btn;
@@ -261,48 +223,191 @@ public class GhidraTablesEditorFrame extends JFrame {
 
     private JComponent buildCenterPanel() {
         JPanel center = new JPanel(new BorderLayout());
-        center.setBackground(TABLE_BG);
+        center.setBackground(GhidraTheme.panelBackground());
         center.add(buildTablePanel(), BorderLayout.CENTER);
-
-        JPanel south = new JPanel(new BorderLayout());
-        south.setBackground(TABLE_BG);
-        south.add(buildEditOpsPanel(), BorderLayout.NORTH);
-        if (table.isHasMAC()) south.add(buildMacPanel(), BorderLayout.CENTER);
-        center.add(south, BorderLayout.SOUTH);
+        center.add(buildInspectorPanel(), BorderLayout.EAST);
         return center;
     }
 
     // =========================================================================
-    // Edit operations strip
+    // Inspector
     // =========================================================================
 
-    private JPanel buildEditOpsPanel() {
-        JPanel p = new JPanel(new BorderLayout());
-        p.setBackground(EDIT_OPS_BG);
-        p.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, GRID_COLOR));
+    private JComponent buildInspectorPanel() {
+        JPanel sidebar = new JPanel();
+        sidebar.setLayout(new BoxLayout(sidebar, BoxLayout.Y_AXIS));
+        sidebar.setBackground(GhidraTheme.surfaceBackground());
+        sidebar.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 1, 0, 0, GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(10, 10, 10, 10)));
+        sidebar.setPreferredSize(new Dimension(260, 0));
 
-        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
-        left.setOpaque(false);
+        sidebar.add(buildOverviewCard());
+        sidebar.add(Box.createVerticalStrut(10));
+        sidebar.add(buildToolCard());
+        sidebar.add(Box.createVerticalStrut(10));
+        sidebar.add(buildSelectionCard());
+        if (table.isHasMAC()) {
+            sidebar.add(Box.createVerticalStrut(10));
+            sidebar.add(buildMacCard());
+        }
+        sidebar.add(Box.createVerticalGlue());
+        return sidebar;
+    }
 
-        JButton interpBtn = makeBtn("Interpolate", new Color(50, 110, 180), e -> interpolateSelected());
-        JButton smoothBtn = makeBtn("Smooth",      new Color(50, 120, 100), e -> smoothSelected(1));
-        JButton smooth3Btn = makeBtn("Smooth ×3",  new Color(40,  95,  80), e -> smoothSelected(3));
+    private JComponent buildOverviewCard() {
+        JPanel content = new JPanel();
+        content.setOpaque(false);
+        content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+        content.add(buildMetaRow("Dimensions", table.getDimensions()));
+        content.add(buildMetaRow("Data Type", table.getDataType().getDisplayName()));
+        content.add(buildMetaRow("X Points", Integer.toString(table.getCountX())));
+        if (table.is2D()) {
+            content.add(buildMetaRow("Y Points",
+                    Integer.toString(((DensoTable2D) table).getCountY())));
+        }
+        content.add(buildMetaRow("MAC", table.isHasMAC() ? table.getMacExpression() : "None"));
+        return buildInspectorCard("Overview", content);
+    }
 
-        interpBtn.setToolTipText("Linear interpolation between first and last selected value in each row");
-        smoothBtn.setToolTipText("3-point average smoothing on selected cells (endpoints held fixed)");
-        smooth3Btn.setToolTipText("Apply smoothing three times");
+    private JComponent buildToolCard() {
+        JPanel content = new JPanel();
+        content.setOpaque(false);
+        content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
 
-        left.add(interpBtn);
-        left.add(smoothBtn);
-        left.add(smooth3Btn);
+        JButton interpBtn = makeBtn("Interpolate", e -> interpolateSelected());
+        JButton smoothBtn = makeBtn("Smooth", e -> smoothSelected());
+        JButton exportBtn = makeBtn("Export CSV", e -> exportCsv());
+        JButton structureBtn = makeBtn("Apply Structure", e -> createStructure());
 
-        JLabel hint = new JLabel("Scroll wheel: ±1   Shift: ±10   Ctrl: ±0.1   Ctrl+Shift: ±0.01  ");
-        hint.setForeground(new Color(80, 100, 130));
-        hint.setFont(new Font(Font.MONOSPACED, Font.ITALIC, 10));
+        interpBtn.setToolTipText("Linearly interpolate between the first and last selected values in each row");
+        smoothBtn.setToolTipText("Apply a single 3-point average pass to the selected interior cells");
 
-        p.add(left, BorderLayout.WEST);
-        p.add(hint, BorderLayout.EAST);
-        return p;
+        for (JButton btn : new JButton[]{interpBtn, smoothBtn, exportBtn, structureBtn}) {
+            btn.setAlignmentX(0f);
+            btn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+            content.add(btn);
+            content.add(Box.createVerticalStrut(6));
+        }
+
+        JLabel hint = new JLabel("<html><div style='width:200px'>Wheel edits selected data cells directly. " +
+                "Shift = 10, Ctrl = 0.1, Ctrl+Shift = 0.01.</div></html>");
+        hint.setAlignmentX(0f);
+        hint.setForeground(GhidraTheme.secondaryForeground());
+        hint.setFont(UI_FONT_SMALL);
+        content.add(Box.createVerticalStrut(4));
+        content.add(hint);
+
+        return buildInspectorCard("Tools", content);
+    }
+
+    private JComponent buildSelectionCard() {
+        JPanel content = new JPanel();
+        content.setOpaque(false);
+        content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+
+        selectionSummaryLabel = new JLabel();
+        selectionSummaryLabel.setAlignmentX(0f);
+        selectionSummaryLabel.setForeground(GhidraTheme.primaryForeground());
+        selectionSummaryLabel.setFont(GhidraTheme.labelFont());
+
+        JLabel hint = new JLabel("<html><div style='width:200px'>Select cells, then drag the wheel, interpolate, or smooth.</div></html>");
+        hint.setAlignmentX(0f);
+        hint.setForeground(GhidraTheme.secondaryForeground());
+        hint.setFont(UI_FONT_SMALL);
+
+        content.add(selectionSummaryLabel);
+        content.add(Box.createVerticalStrut(8));
+        content.add(hint);
+
+        return buildInspectorCard("Selection", content);
+    }
+
+    private JComponent buildMacCard() {
+        JPanel content = new JPanel();
+        content.setOpaque(false);
+        content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+
+        JLabel scaleLbl = new JLabel("Scale");
+        scaleLbl.setAlignmentX(0f);
+        scaleLbl.setForeground(GhidraTheme.secondaryForeground());
+        scaleLbl.setFont(UI_FONT_SMALL);
+
+        multField = makeMacField(String.valueOf(table.getMultiplier()));
+        multField.setAlignmentX(0f);
+        multField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+
+        JLabel offLbl = new JLabel("Offset");
+        offLbl.setAlignmentX(0f);
+        offLbl.setForeground(GhidraTheme.secondaryForeground());
+        offLbl.setFont(UI_FONT_SMALL);
+
+        offField = makeMacField(String.valueOf(table.getOffset()));
+        offField.setAlignmentX(0f);
+        offField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+
+        macExprLabel = new JLabel(table.getMacExpression());
+        macExprLabel.setAlignmentX(0f);
+        macExprLabel.setForeground(GhidraTheme.secondaryForeground());
+        macExprLabel.setFont(UI_FONT_SMALL.deriveFont(Font.ITALIC));
+
+        ActionListener commit = e -> commitMacFields();
+        multField.addActionListener(commit);
+        offField.addActionListener(commit);
+        multField.addFocusListener(new FocusAdapter() {
+            @Override public void focusLost(FocusEvent e) { commitMacFields(); }
+        });
+        offField.addFocusListener(new FocusAdapter() {
+            @Override public void focusLost(FocusEvent e) { commitMacFields(); }
+        });
+
+        content.add(scaleLbl);
+        content.add(Box.createVerticalStrut(4));
+        content.add(multField);
+        content.add(Box.createVerticalStrut(8));
+        content.add(offLbl);
+        content.add(Box.createVerticalStrut(4));
+        content.add(offField);
+        content.add(Box.createVerticalStrut(10));
+        content.add(macExprLabel);
+
+        return buildInspectorCard("MAC", content);
+    }
+
+    private JComponent buildInspectorCard(String title, JComponent content) {
+        JPanel card = new JPanel(new BorderLayout(0, 10));
+        card.setAlignmentX(0f);
+        card.setBackground(GhidraTheme.cardBackground());
+        card.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(10, 12, 10, 12)));
+
+        JLabel titleLabel = new JLabel(title);
+        titleLabel.setForeground(GhidraTheme.primaryForeground());
+        titleLabel.setFont(UI_FONT_BOLD);
+
+        card.add(titleLabel, BorderLayout.NORTH);
+        card.add(content, BorderLayout.CENTER);
+        return card;
+    }
+
+    private JComponent buildMetaRow(String key, String value) {
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setOpaque(false);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
+
+        JLabel keyLabel = new JLabel(key);
+        keyLabel.setForeground(GhidraTheme.secondaryForeground());
+        keyLabel.setFont(UI_FONT_SMALL);
+
+        JLabel valueLabel = new JLabel(value);
+        valueLabel.setForeground(GhidraTheme.primaryForeground());
+        valueLabel.setFont(UI_FONT_SMALL);
+        valueLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+
+        row.add(keyLabel, BorderLayout.WEST);
+        row.add(valueLabel, BorderLayout.EAST);
+        return row;
     }
 
     // =========================================================================
@@ -318,34 +423,42 @@ public class GhidraTablesEditorFrame extends JFrame {
         configureGrid();
 
         JScrollPane scroll = new JScrollPane(grid);
-        scroll.setBackground(TABLE_BG);
-        scroll.getViewport().setBackground(TABLE_BG);
-        scroll.setBorder(BorderFactory.createEmptyBorder(4, 4, 0, 4));
+        scroll.setBackground(GhidraTheme.tableBackground());
+        scroll.getViewport().setBackground(GhidraTheme.tableBackground());
+        scroll.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 
         if (table.is2D()) {
             rowHeaderTable = buildRowHeader((DensoTable2D) table);
             scroll.setRowHeaderView(rowHeaderTable);
             scroll.setCorner(JScrollPane.UPPER_LEFT_CORNER, buildCornerLabel());
         }
+        else {
+            rowHeaderTable = buildRowHeader((DensoTable1D) table);
+            scroll.setRowHeaderView(rowHeaderTable);
+        }
 
         return scroll;
     }
 
     private void configureGrid() {
-        grid.setBackground(TABLE_BG);
-        grid.setForeground(Color.WHITE);
-        grid.setGridColor(GRID_COLOR);
-        grid.setRowHeight(24);
-        grid.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        grid.setBackground(GhidraTheme.tableBackground());
+        grid.setForeground(GhidraTheme.tableForeground());
+        grid.setGridColor(GhidraTheme.tableGridColor());
+        grid.setSelectionBackground(GhidraTheme.tableSelectionBackground());
+        grid.setSelectionForeground(GhidraTheme.tableSelectionForeground());
+        grid.setShowVerticalLines(false);
+        grid.setIntercellSpacing(new Dimension(0, 1));
+        grid.setRowHeight(26);
+        grid.setFont(UI_FONT);
         grid.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         grid.setCellSelectionEnabled(true);
         grid.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         grid.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
 
         JTableHeader header = grid.getTableHeader();
-        header.setBackground(new Color(38, 50, 66));
-        header.setForeground(new Color(180, 200, 220));
-        header.setFont(new Font(Font.MONOSPACED, Font.BOLD, 11));
+        header.setBackground(GhidraTheme.tableHeaderBackground());
+        header.setForeground(GhidraTheme.tableHeaderForeground());
+        header.setFont(UI_FONT_BOLD);
         header.setReorderingAllowed(false);
 
         renderer = new HeatMapCellRenderer() {
@@ -411,26 +524,20 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         // ── Right-click context menu ──────────────────────────────────────────
         JPopupMenu cellMenu = new JPopupMenu();
-        cellMenu.setBackground(new Color(28, 36, 48));
 
         JMenuItem miInterp   = new JMenuItem("Interpolate");
         JMenuItem miSmooth   = new JMenuItem("Smooth");
-        JMenuItem miSmooth3  = new JMenuItem("Smooth ×3");
 
-        for (JMenuItem mi : new JMenuItem[]{miInterp, miSmooth, miSmooth3}) {
-            mi.setBackground(new Color(28, 36, 48));
-            mi.setForeground(INFO_FG);
-            mi.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        for (JMenuItem mi : new JMenuItem[]{miInterp, miSmooth}) {
+            mi.setFont(GhidraTheme.labelFont());
         }
 
         miInterp.addActionListener(e  -> interpolateSelected());
-        miSmooth.addActionListener(e  -> smoothSelected(1));
-        miSmooth3.addActionListener(e -> smoothSelected(3));
+        miSmooth.addActionListener(e  -> smoothSelected());
 
         cellMenu.add(miInterp);
         cellMenu.addSeparator();
         cellMenu.add(miSmooth);
-        cellMenu.add(miSmooth3);
 
         grid.addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e)  { if (e.isPopupTrigger()) cellMenu.show(grid, e.getX(), e.getY()); }
@@ -540,11 +647,10 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     /**
-     * Applies {@code passes} iterations of a 3-point equal-weight moving average
-     * to the interior of each selected data row.  Endpoint cells are held fixed
-     * as anchors so the overall shape is preserved.
+     * Applies a single 3-point equal-weight moving average to the interior of
+     * each selected data row. Endpoint cells are held fixed as anchors.
      */
-    private void smoothSelected(int passes) {
+    private void smoothSelected() {
         int[] viewRows = grid.getSelectedRows();
         int[] viewCols = grid.getSelectedColumns();
         if (viewCols.length < 3) {
@@ -562,17 +668,13 @@ public class GhidraTablesEditorFrame extends JFrame {
             int mr = grid.convertRowIndexToModel(vr);
             if (!tableModel.isCellEditable(mr, modelCols[0])) continue;
 
-            for (int pass = 0; pass < passes; pass++) {
-                // Snapshot physical values for this row
-                double[] phys = new double[modelCols.length];
-                for (int ci = 0; ci < modelCols.length; ci++) {
-                    phys[ci] = table.toPhysical(getRawValue(mr, modelCols[ci]));
-                }
-                // 3-point average on interior cells; endpoints stay fixed
-                for (int ci = 1; ci < modelCols.length - 1; ci++) {
-                    double smoothed = (phys[ci - 1] + phys[ci] + phys[ci + 1]) / 3.0;
-                    setRawValue(mr, modelCols[ci], table.toRaw(smoothed));
-                }
+            double[] phys = new double[modelCols.length];
+            for (int ci = 0; ci < modelCols.length; ci++) {
+                phys[ci] = table.toPhysical(getRawValue(mr, modelCols[ci]));
+            }
+            for (int ci = 1; ci < modelCols.length - 1; ci++) {
+                double smoothed = (phys[ci - 1] + phys[ci] + phys[ci + 1]) / 3.0;
+                setRawValue(mr, modelCols[ci], table.toRaw(smoothed));
             }
             changed = true;
         }
@@ -594,24 +696,24 @@ public class GhidraTablesEditorFrame extends JFrame {
         rowHeaderModel = rhModel;
 
         JTable rh = new JTable(rhModel);
-        rh.setBackground(new Color(38, 50, 66));
-        rh.setForeground(new Color(180, 200, 220));
-        rh.setFont(new Font(Font.MONOSPACED, Font.BOLD, 12));
+        rh.setBackground(GhidraTheme.tableHeaderBackground());
+        rh.setForeground(GhidraTheme.tableHeaderForeground());
+        rh.setFont(UI_FONT_BOLD);
         rh.setRowHeight(grid.getRowHeight());
         rh.setPreferredScrollableViewportSize(new Dimension(70, 0));
         rh.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             {
                 setHorizontalAlignment(SwingConstants.CENTER);
-                setBackground(new Color(38, 50, 66));
-                setForeground(new Color(180, 200, 220));
-                setFont(new Font(Font.MONOSPACED, Font.BOLD, 12));
+                setBackground(GhidraTheme.tableHeaderBackground());
+                setForeground(GhidraTheme.tableHeaderForeground());
+                setFont(UI_FONT_BOLD);
             }
             @Override
             public Component getTableCellRendererComponent(JTable t, Object v,
                     boolean s, boolean f, int r, int c) {
                 super.getTableCellRendererComponent(t, v, false, false, r, c);
                 setOpaque(true);
-                setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GRID_COLOR));
+                setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.tableGridColor()));
                 return this;
             }
         });
@@ -620,13 +722,49 @@ public class GhidraTablesEditorFrame extends JFrame {
         return rh;
     }
 
+    private JTable buildRowHeader(DensoTable1D t1d) {
+        DefaultTableModel rhModel = new DefaultTableModel(2, 1) {
+            @Override public boolean isCellEditable(int r, int c) { return false; }
+            @Override public Object getValueAt(int r, int c) {
+                return r == 0 ? "X Axis" : "Value";
+            }
+        };
+        rowHeaderModel = rhModel;
+
+        JTable rh = new JTable(rhModel);
+        rh.setBackground(GhidraTheme.tableHeaderBackground());
+        rh.setForeground(GhidraTheme.tableHeaderForeground());
+        rh.setFont(UI_FONT_BOLD);
+        rh.setRowHeight(grid.getRowHeight());
+        rh.setPreferredScrollableViewportSize(new Dimension(72, 0));
+        rh.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
+            {
+                setHorizontalAlignment(SwingConstants.CENTER);
+                setBackground(GhidraTheme.tableHeaderBackground());
+                setForeground(GhidraTheme.tableHeaderForeground());
+                setFont(UI_FONT_BOLD);
+            }
+            @Override
+            public Component getTableCellRendererComponent(JTable t, Object v,
+                    boolean s, boolean f, int r, int c) {
+                super.getTableCellRendererComponent(t, v, false, false, r, c);
+                setOpaque(true);
+                setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.tableGridColor()));
+                return this;
+            }
+        });
+        rh.getColumnModel().getColumn(0).setPreferredWidth(72);
+        rh.setTableHeader(null);
+        return rh;
+    }
+
     private JLabel buildCornerLabel() {
         JLabel l = new JLabel("Y\\X", SwingConstants.CENTER);
-        l.setFont(new Font(Font.MONOSPACED, Font.BOLD | Font.ITALIC, 11));
-        l.setForeground(new Color(120, 150, 180));
-        l.setBackground(new Color(25, 35, 48));
+        l.setFont(UI_FONT_SMALL.deriveFont(Font.BOLD | Font.ITALIC));
+        l.setForeground(GhidraTheme.secondaryForeground());
+        l.setBackground(GhidraTheme.surfaceBackground());
         l.setOpaque(true);
-        l.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GRID_COLOR));
+        l.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.tableGridColor()));
         return l;
     }
 
@@ -682,60 +820,14 @@ public class GhidraTablesEditorFrame extends JFrame {
         updateStatus();
     }
 
-    // =========================================================================
-    // MAC panel
-    // =========================================================================
-
-    private JPanel buildMacPanel() {
-        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 5));
-        panel.setBackground(MAC_BG);
-        panel.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, GRID_COLOR));
-
-        JLabel lbl      = new JLabel("MAC");
-        JLabel scaleLbl = new JLabel("Scale ×");
-        JLabel offLbl   = new JLabel("Offset +");
-
-        lbl.setForeground(new Color(200, 160, 60));
-        lbl.setFont(new Font(Font.MONOSPACED, Font.BOLD, 11));
-        scaleLbl.setForeground(DIM_FG);
-        scaleLbl.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
-        offLbl.setForeground(DIM_FG);
-        offLbl.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
-
-        multField    = makeMacField(String.valueOf(table.getMultiplier()));
-        offField     = makeMacField(String.valueOf(table.getOffset()));
-        macExprLabel = new JLabel(table.getMacExpression());
-        macExprLabel.setForeground(new Color(130, 190, 130));
-        macExprLabel.setFont(new Font(Font.MONOSPACED, Font.ITALIC, 11));
-
-        ActionListener commit = e -> commitMacFields();
-        multField.addActionListener(commit);
-        offField.addActionListener(commit);
-        multField.addFocusListener(new FocusAdapter() {
-            @Override public void focusLost(FocusEvent e) { commitMacFields(); }
-        });
-        offField.addFocusListener(new FocusAdapter() {
-            @Override public void focusLost(FocusEvent e) { commitMacFields(); }
-        });
-
-        panel.add(lbl);
-        panel.add(scaleLbl);
-        panel.add(multField);
-        panel.add(offLbl);
-        panel.add(offField);
-        panel.add(Box.createHorizontalStrut(6));
-        panel.add(macExprLabel);
-        return panel;
-    }
-
     private JTextField makeMacField(String value) {
         JTextField f = new JTextField(value, 10);
-        f.setBackground(new Color(25, 34, 46));
-        f.setForeground(new Color(200, 220, 180));
-        f.setCaretColor(Color.WHITE);
-        f.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        f.setBackground(GhidraTheme.textFieldBackground());
+        f.setForeground(GhidraTheme.textFieldForeground());
+        f.setCaretColor(GhidraTheme.textFieldCaret());
+        f.setFont(GhidraTheme.textFieldFont());
         f.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(60, 80, 100)),
+                BorderFactory.createLineBorder(GhidraTheme.borderColor()),
                 BorderFactory.createEmptyBorder(2, 4, 2, 4)));
         return f;
     }
@@ -751,22 +843,22 @@ public class GhidraTablesEditorFrame extends JFrame {
             String validationError = DensoTable.validateMacParameters(newMult, newOff);
             if (validationError != null) {
                 statusLabel.setText(validationError);
-                multField.setForeground(new Color(220, 80, 80));
-                offField.setForeground(new Color(220, 80, 80));
+                multField.setForeground(GhidraTheme.errorForeground());
+                offField.setForeground(GhidraTheme.errorForeground());
                 return;
             }
             table.setMultiplier(newMult);
             table.setOffset(newOff);
             macExprLabel.setText(table.getMacExpression());
-            multField.setForeground(new Color(200, 220, 180));
-            offField.setForeground(new Color(200, 220, 180));
+            multField.setForeground(GhidraTheme.textFieldForeground());
+            offField.setForeground(GhidraTheme.textFieldForeground());
             tableModel.fireTableDataChanged();
             refreshHeatRange();
             markDirty();
         } catch (NumberFormatException ex) {
             statusLabel.setText("MAC fields must be numeric.");
-            multField.setForeground(new Color(220, 80, 80));
-            offField.setForeground(new Color(220, 80, 80));
+            multField.setForeground(GhidraTheme.errorForeground());
+            offField.setForeground(GhidraTheme.errorForeground());
         }
     }
 
@@ -779,7 +871,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         int[] cols = grid.getSelectedColumns();
 
         if (rows.length == 0 || cols.length == 0) {
-            statusLabel.setText("No selection");
+            selectionSummaryLabel.setText("<html><b>No cells selected</b><br>Pick a region to inspect and edit.</html>");
             return;
         }
 
@@ -801,12 +893,13 @@ public class GhidraTablesEditorFrame extends JFrame {
         }
 
         if (count == 0) {
-            statusLabel.setText("Header cells (read-only)");
+            selectionSummaryLabel.setText("<html><b>Header cells</b><br>The current selection is read-only.</html>");
         } else if (count == 1) {
-            statusLabel.setText(String.format("Val: %.6g", lastVal));
+            selectionSummaryLabel.setText(String.format(
+                    "<html><b>1 cell selected</b><br>Value: %.6g</html>", lastVal));
         } else {
-            statusLabel.setText(String.format(
-                    "%d cells  Min: %.4g  Max: %.4g  Avg: %.4g",
+            selectionSummaryLabel.setText(String.format(
+                    "<html><b>%d cells selected</b><br>Min %.4g  Max %.4g  Avg %.4g</html>",
                     count, minV, maxV, sum / count));
         }
     }
@@ -1011,8 +1104,8 @@ public class GhidraTablesEditorFrame extends JFrame {
         if (!table.isHasMAC() || multField == null) return;
         multField.setText(String.valueOf(table.getMultiplier()));
         offField.setText(String.valueOf(table.getOffset()));
-        multField.setForeground(new Color(200, 220, 180));
-        offField.setForeground(new Color(200, 220, 180));
+        multField.setForeground(GhidraTheme.textFieldForeground());
+        offField.setForeground(GhidraTheme.textFieldForeground());
         macExprLabel.setText(table.getMacExpression());
     }
 
@@ -1155,8 +1248,8 @@ public class GhidraTablesEditorFrame extends JFrame {
     private Dimension computePreferredSize() {
         int cols = tableModel.getColumnCount();
         int rows = tableModel.getRowCount();
-        int w    = Math.min(cols * 76 + 120, 1400);
+        int w    = Math.min(cols * 76 + 380, 1500);
         int h    = Math.min(rows * 26 + 200,  900);
-        return new Dimension(Math.max(w, 520), Math.max(h, 340));
+        return new Dimension(Math.max(w, 820), Math.max(h, 420));
     }
 }

@@ -45,11 +45,14 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     private JComponent root;
     private GFilterTable<DensoTable> filterTable;
     private DensoTableListModel model;
+    private JLabel programLabel;
+    private JLabel summaryLabel;
 
     private JLabel statusLabel;
     private DockingAction scanAction;
     private DockingAction applyStructureAction;
     private final AtomicLong scanGeneration = new AtomicLong();
+    private List<DensoTable> currentTables = List.of();
 
     // ── Construction ──────────────────────────────────────────────────────────
 
@@ -112,7 +115,9 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
 
     public void programChanged(Program program) {
         scanGeneration.incrementAndGet();
+        currentTables = List.of();
         model.setTables(List.of());
+        updateOverview(program, currentTables);
         statusLabel.setText(program == null
                 ? "No program loaded - click Scan to begin."
                 : "Program loaded - click Scan to find tables.");
@@ -125,26 +130,65 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
 
     private JComponent build() {
         JPanel panel = new JPanel(new BorderLayout(0, 4));
-        panel.setBackground(new Color(28, 36, 48));
+        panel.setBackground(GhidraTheme.panelBackground());
         panel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
+        panel.add(buildOverviewPanel(), BorderLayout.NORTH);
         panel.add(buildTablePanel(), BorderLayout.CENTER);
         panel.add(buildStatusPanel(), BorderLayout.SOUTH);
 
         return panel;
     }
 
+    private JComponent buildOverviewPanel() {
+        JPanel panel = new JPanel(new BorderLayout(10, 0));
+        panel.setBackground(GhidraTheme.surfaceBackground());
+        panel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+
+        JLabel title = new JLabel("GhidraTables");
+        title.setForeground(GhidraTheme.primaryForeground());
+        title.setFont(GhidraTheme.titleFont());
+
+        programLabel = new JLabel("No active program");
+        programLabel.setForeground(GhidraTheme.secondaryForeground());
+        programLabel.setFont(GhidraTheme.smallFont());
+
+        summaryLabel = new JLabel("0 tables");
+        summaryLabel.setForeground(GhidraTheme.primaryForeground());
+        summaryLabel.setFont(GhidraTheme.labelFont());
+
+        JPanel left = new JPanel();
+        left.setOpaque(false);
+        left.setLayout(new BoxLayout(left, BoxLayout.Y_AXIS));
+        left.add(title);
+        left.add(Box.createVerticalStrut(2));
+        left.add(programLabel);
+
+        panel.add(left, BorderLayout.WEST);
+        panel.add(summaryLabel, BorderLayout.EAST);
+        return panel;
+    }
+
     private Component buildTablePanel() {
         filterTable = new GFilterTable<>(model);
+        filterTable.setBackground(GhidraTheme.panelBackground());
+        filterTable.getFilterPanel().setBackground(GhidraTheme.panelBackground());
 
         JTable jt = filterTable.getTable();
-        jt.setBackground(new Color(22, 30, 44));
-        jt.setForeground(new Color(200, 215, 230));
-        jt.setGridColor(new Color(45, 56, 72));
-        jt.setRowHeight(22);
-        jt.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        jt.getTableHeader().setBackground(new Color(38, 50, 66));
-        jt.getTableHeader().setForeground(new Color(160, 190, 220));
+        jt.setBackground(GhidraTheme.tableBackground());
+        jt.setForeground(GhidraTheme.tableForeground());
+        jt.setGridColor(GhidraTheme.tableGridColor());
+        jt.setSelectionBackground(GhidraTheme.tableSelectionBackground());
+        jt.setSelectionForeground(GhidraTheme.tableSelectionForeground());
+        jt.setShowVerticalLines(false);
+        jt.setIntercellSpacing(new Dimension(0, 1));
+        jt.setRowHeight(24);
+        jt.setFont(GhidraTheme.tableFont());
+        jt.getTableHeader().setBackground(GhidraTheme.tableHeaderBackground());
+        jt.getTableHeader().setForeground(GhidraTheme.tableHeaderForeground());
+        jt.getTableHeader().setFont(GhidraTheme.tableHeaderFont());
 
         jt.addMouseListener(new MouseAdapter() {
             @Override
@@ -173,16 +217,18 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
 
     private Component buildStatusPanel() {
         JPanel p = new JPanel(new BorderLayout());
-        p.setBackground(new Color(22, 30, 42));
-        p.setBorder(BorderFactory.createEmptyBorder(3, 6, 3, 6));
+        p.setBackground(GhidraTheme.surfaceBackground());
+        p.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 0, 0, GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(5, 8, 4, 8)));
 
         statusLabel = new JLabel("No program loaded - click Scan to begin.");
-        statusLabel.setForeground(new Color(130, 160, 190));
-        statusLabel.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        statusLabel.setForeground(GhidraTheme.primaryForeground());
+        statusLabel.setFont(GhidraTheme.labelFont());
 
-        JLabel hint = new JLabel("dbl-click addr col: navigate  |  dbl-click row: edit");
-        hint.setForeground(new Color(80, 100, 130));
-        hint.setFont(new Font(Font.MONOSPACED, Font.ITALIC, 10));
+        JLabel hint = new JLabel("Enter: edit  |  Double-click address: navigate  |  Double-click row: edit");
+        hint.setForeground(GhidraTheme.secondaryForeground());
+        hint.setFont(GhidraTheme.smallFont());
 
         p.add(statusLabel, BorderLayout.WEST);
         p.add(hint,        BorderLayout.EAST);
@@ -313,6 +359,8 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
             return;
         }
 
+        currentTables = List.copyOf(tables);
+        updateOverview(scannedProgram, currentTables);
         model.setTables(tables);
         statusLabel.setText(String.format(
                 "Found %d table%s  (1D: %d  2D: %d)",
@@ -324,5 +372,17 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
 
     private boolean isCurrentScan(long scanId, Program scannedProgram) {
         return scanGeneration.get() == scanId && plugin.getCurrentProgram() == scannedProgram;
+    }
+
+    private void updateOverview(Program program, List<DensoTable> tables) {
+        if (programLabel == null) {
+            return;
+        }
+        programLabel.setText(program == null
+                ? "No active program"
+                : "Program: " + program.getName());
+        long oneD = tables.stream().filter(t -> !t.is2D()).count();
+        long twoD = tables.stream().filter(DensoTable::is2D).count();
+        summaryLabel.setText(String.format("%d total  |  %d 1D  |  %d 2D", tables.size(), oneD, twoD));
     }
 }

@@ -11,7 +11,7 @@ import javax.swing.table.DefaultTableCellRenderer;
 /**
  * A {@link javax.swing.table.TableCellRenderer} that colours data cells using
  * a blue→cyan→green→yellow→red heat-map gradient, and renders axis header
- * cells with a dark steel-blue background.
+ * cells using the active Ghidra theme.
  *
  * <p>Cell types:
  * <ul>
@@ -25,13 +25,6 @@ import javax.swing.table.DefaultTableCellRenderer;
 public class HeatMapCellRenderer extends DefaultTableCellRenderer {
 
     public enum CellRole { CORNER, X_HEADER, Y_HEADER, DATA }
-
-    // ── Palette ──────────────────────────────────────────────────────────────
-    private static final Color HEADER_BG   = new Color(38,  50,  66);
-    private static final Color HEADER_FG   = new Color(180, 200, 220);
-    private static final Color CORNER_BG   = new Color(25,  35,  48);
-    private static final Color CORNER_FG   = new Color(120, 150, 180);
-    private static final Color SELECTED_BG = new Color(80, 120, 200, 180);
 
     private double globalMin = 0;
     private double globalMax = 1;
@@ -59,20 +52,21 @@ public class HeatMapCellRenderer extends DefaultTableCellRenderer {
 
         switch (role) {
             case CORNER -> {
-                label.setBackground(CORNER_BG);
-                label.setForeground(CORNER_FG);
+                label.setBackground(GhidraTheme.surfaceBackground());
+                label.setForeground(GhidraTheme.secondaryForeground());
                 label.setFont(label.getFont().deriveFont(Font.BOLD | Font.ITALIC));
             }
             case X_HEADER, Y_HEADER -> {
-                label.setBackground(HEADER_BG);
-                label.setForeground(HEADER_FG);
+                label.setBackground(GhidraTheme.tableHeaderBackground());
+                label.setForeground(GhidraTheme.tableHeaderForeground());
                 label.setFont(label.getFont().deriveFont(Font.BOLD));
             }
             case DATA -> {
                 double numeric = parseDouble(value);
                 double norm    = normalize(numeric);
                 Color  bg      = heatColor(norm);
-                label.setBackground(isSelected ? blend(bg, SELECTED_BG, 0.6f) : bg);
+                Color  selected = GhidraTheme.tableSelectionBackground();
+                label.setBackground(isSelected ? blend(bg, selected, 0.35f) : bg);
                 label.setForeground(isDark(bg) ? Color.WHITE : Color.BLACK);
                 label.setFont(label.getFont().deriveFont(Font.PLAIN));
             }

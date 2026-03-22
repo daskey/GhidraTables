@@ -38,8 +38,11 @@ public class MultiEditTableCellEditor extends AbstractCellEditor
     public MultiEditTableCellEditor() {
         field = new JTextField();
         field.setHorizontalAlignment(SwingConstants.CENTER);
-        field.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        field.setBorder(BorderFactory.createLineBorder(new Color(80, 140, 220), 2));
+        field.setFont(GhidraTheme.textFieldFont());
+        field.setBackground(GhidraTheme.textFieldBackground());
+        field.setForeground(GhidraTheme.textFieldForeground());
+        field.setCaretColor(GhidraTheme.textFieldCaret());
+        field.setBorder(BorderFactory.createLineBorder(GhidraTheme.tableSelectionBackground(), 2));
 
         // Commit on Enter, cancel on Escape
         field.addActionListener(e -> stopCellEditing());
@@ -102,8 +105,8 @@ public class MultiEditTableCellEditor extends AbstractCellEditor
         }
         catch (NumberFormatException ex) {
             // Flash the field red to signal bad input
-            field.setBackground(new Color(255, 80, 80));
-            Timer reset = new Timer(400, e -> field.setBackground(UIManager.getColor("TextField.background")));
+            field.setBackground(GhidraTheme.invalidFieldBackground());
+            Timer reset = new Timer(400, e -> field.setBackground(GhidraTheme.textFieldBackground()));
             reset.setRepeats(false);
             reset.start();
             return false; // keep editing open

@@ -59,11 +59,10 @@ public class DensoTableListModel extends ThreadedTableModelStub<DensoTable> {
     protected TableColumnDescriptor<DensoTable> createTableColumnDescriptor() {
         TableColumnDescriptor<DensoTable> d = new TableColumnDescriptor<>();
         d.addVisibleColumn(new NameColumn());
-        d.addVisibleColumn(new CategoryColumn());
         d.addVisibleColumn(new TypeColumn());
-        d.addVisibleColumn(new AddressColumn(), 0, true);  // sort by address by default
         d.addVisibleColumn(new DimensionsColumn());
         d.addVisibleColumn(new DataTypeColumn());
+        d.addVisibleColumn(new AddressColumn(), 0, true);  // sort by address by default
         d.addVisibleColumn(new MacColumn());
         return d;
     }
@@ -80,16 +79,6 @@ public class DensoTableListModel extends ThreadedTableModelStub<DensoTable> {
             return row.getName();
         }
         @Override public int getColumnPreferredWidth() { return 200; }
-    }
-
-    private static class CategoryColumn
-            extends AbstractDynamicTableColumn<DensoTable, String, Object> {
-        @Override public String getColumnName() { return "Category"; }
-        @Override public String getValue(DensoTable row, Settings s, Object data,
-                ServiceProvider sp) {
-            return row.getCategory();
-        }
-        @Override public int getColumnPreferredWidth() { return 120; }
     }
 
     private static class TypeColumn
