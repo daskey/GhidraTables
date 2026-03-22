@@ -48,7 +48,6 @@ public class HeatMapCellRenderer extends DefaultTableCellRenderer {
                 table, value, false, false, row, col);
 
         label.setHorizontalAlignment(SwingConstants.CENTER);
-        label.setBorder(BorderFactory.createEmptyBorder(1, 4, 1, 4));
 
         CellRole role = getRoleFor(row, col);
 
@@ -57,20 +56,45 @@ public class HeatMapCellRenderer extends DefaultTableCellRenderer {
                 label.setBackground(GhidraTheme.surfaceBackground());
                 label.setForeground(GhidraTheme.secondaryForeground());
                 label.setFont(label.getFont().deriveFont(Font.BOLD | Font.ITALIC));
+                label.setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.subtleBorderColor()),
+                        BorderFactory.createEmptyBorder(2, 4, 2, 4)));
             }
             case X_HEADER, Y_HEADER -> {
-                label.setBackground(GhidraTheme.tableHeaderBackground());
+                Color headerBg = (role == CellRole.Y_HEADER && row % 2 == 0)
+                        ? GhidraTheme.tableHeaderStripeBackground()
+                        : GhidraTheme.tableHeaderBackground();
+                label.setBackground(headerBg);
                 label.setForeground(GhidraTheme.tableHeaderForeground());
                 label.setFont(label.getFont().deriveFont(Font.BOLD));
+                label.setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createMatteBorder(0, 0,
+                                role == CellRole.X_HEADER ? 1 : 0,
+                                role == CellRole.Y_HEADER ? 1 : 0,
+                                GhidraTheme.subtleBorderColor()),
+                        BorderFactory.createEmptyBorder(2, 6, 2, 6)));
             }
             case DATA -> {
                 double numeric = parseDouble(value);
                 double norm    = normalize(numeric);
                 Color  bg      = heatColor(norm);
-                Color  selected = GhidraTheme.tableSelectionBackground();
-                label.setBackground(isSelected ? blend(bg, selected, 0.35f) : bg);
-                label.setForeground(isDark(bg) ? Color.WHITE : Color.BLACK);
+
+                if (isSelected) {
+                    Color selected = GhidraTheme.tableSelectionBackground();
+                    bg = blend(bg, selected, 0.35f);
+                }
+
+                label.setBackground(bg);
+                label.setForeground(contrastText(bg));
                 label.setFont(label.getFont().deriveFont(Font.PLAIN));
+
+                if (isSelected && hasFocus) {
+                    label.setBorder(BorderFactory.createCompoundBorder(
+                            BorderFactory.createLineBorder(GhidraTheme.focusRingColor(), 2),
+                            BorderFactory.createEmptyBorder(0, 2, 0, 2)));
+                } else {
+                    label.setBorder(BorderFactory.createEmptyBorder(1, 4, 1, 4));
+                }
             }
         }
 
@@ -101,34 +125,51 @@ public class HeatMapCellRenderer extends DefaultTableCellRenderer {
     }
 
     /**
-     * Maps a normalised value [0,1] to a blue → cyan → green → yellow → red
-     * heat-map colour, adjusted for the current dark/light theme.
+     * Maps a normalised value [0,1] to a perceptually smoother heat-map using
+     * a 5-stop gradient:  deep blue → cyan → green → amber → red.
+     * The stops are tuned so mid-range values (greens/yellows) occupy more
+     * visual space, matching human colour sensitivity.
      */
     public static Color heatColor(double t) {
         t = Math.max(0, Math.min(1, t));
 
+        // 5-stop gradient with adjusted breakpoints for better perceptual uniformity
         int r, g, b;
-        if (t < 0.25) {
-            double s = t / 0.25;
-            r = 0;
-            g = (int) (255 * s);
-            b = 255;
-        } else if (t < 0.5) {
-            double s = (t - 0.25) / 0.25;
-            r = 0;
-            g = 255;
+        if (t < 0.20) {
+            // Deep blue → Cyan
+            double s = t / 0.20;
+            r = (int) (20 * (1 - s));
+            g = (int) (60 + 195 * s);
+            b = (int) (220 + 35 * s);
+        } else if (t < 0.45) {
+            // Cyan → Green
+            double s = (t - 0.20) / 0.25;
+            r = (int) (40 * s);
+            g = (int) (220 + 35 * (1 - s * 0.3));
             b = (int) (255 * (1 - s));
-        } else if (t < 0.75) {
-            double s = (t - 0.5) / 0.25;
-            r = (int) (255 * s);
-            g = 255;
+        } else if (t < 0.65) {
+            // Green → Amber/Yellow
+            double s = (t - 0.45) / 0.20;
+            r = (int) (40 + 215 * s);
+            g = (int) (230 - 20 * s);
+            b = (int) (20 * (1 - s));
+        } else if (t < 0.85) {
+            // Amber → Orange-Red
+            double s = (t - 0.65) / 0.20;
+            r = 255;
+            g = (int) (210 - 140 * s);
             b = 0;
         } else {
-            double s = (t - 0.75) / 0.25;
-            r = 255;
-            g = (int) (255 * (1 - s));
-            b = 0;
+            // Orange-Red → Deep Red
+            double s = (t - 0.85) / 0.15;
+            r = (int) (255 - 35 * s);
+            g = (int) (70 - 50 * s);
+            b = (int) (15 * s);
         }
+
+        r = Math.max(0, Math.min(255, r));
+        g = Math.max(0, Math.min(255, g));
+        b = Math.max(0, Math.min(255, b));
         Color raw = new Color(r, g, b);
 
         // Adjust for dark themes: slightly desaturate and brighten to avoid
@@ -140,20 +181,33 @@ public class HeatMapCellRenderer extends DefaultTableCellRenderer {
         return raw;
     }
 
-    /** Returns true if the colour is perceived as dark. */
-    private static boolean isDark(Color c) {
-        double lum = 0.2126 * c.getRed() / 255.0
-                   + 0.7152 * c.getGreen() / 255.0
-                   + 0.0722 * c.getBlue() / 255.0;
-        return lum < 0.45;
+    /**
+     * Picks white or black text for maximum contrast against the given
+     * background, using WCAG relative luminance.
+     */
+    private static Color contrastText(Color bg) {
+        double lum = relativeLuminance(bg);
+        return lum < 0.40 ? new Color(240, 240, 240) : new Color(30, 30, 30);
+    }
+
+    /** WCAG relative luminance for contrast calculations. */
+    private static double relativeLuminance(Color c) {
+        return 0.2126 * linearize(c.getRed())
+             + 0.7152 * linearize(c.getGreen())
+             + 0.0722 * linearize(c.getBlue());
+    }
+
+    private static double linearize(int channel) {
+        double s = channel / 255.0;
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
     }
 
     /** Blends two colours. {@code t} = weight of {@code b}. */
     private static Color blend(Color a, Color b, float t) {
         float s = 1 - t;
-        int r = Math.min(255, (int) (a.getRed()   * s + b.getRed()   * t));
-        int g = Math.min(255, (int) (a.getGreen() * s + b.getGreen() * t));
-        int bv= Math.min(255, (int) (a.getBlue()  * s + b.getBlue()  * t));
+        int r = Math.min(255, Math.max(0, (int) (a.getRed()   * s + b.getRed()   * t)));
+        int g = Math.min(255, Math.max(0, (int) (a.getGreen() * s + b.getGreen() * t)));
+        int bv= Math.min(255, Math.max(0, (int) (a.getBlue()  * s + b.getBlue()  * t)));
         return new Color(r, g, bv);
     }
 }

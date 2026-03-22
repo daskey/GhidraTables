@@ -201,8 +201,8 @@ public class GhidraTablesEditorFrame extends JFrame {
         JPanel bar = new JPanel(new BorderLayout(10, 0));
         bar.setBackground(GhidraTheme.surfaceBackground());
         bar.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(0, 0, 1, 0, GhidraTheme.borderColor()),
-                BorderFactory.createEmptyBorder(6, 10, 6, 10)));
+                BorderFactory.createMatteBorder(0, 0, 1, 0, GhidraTheme.subtleBorderColor()),
+                BorderFactory.createEmptyBorder(7, 12, 7, 12)));
 
         // ── Left: table name + info chips ───────────────────────────────
         JPanel leftGroup = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
@@ -306,14 +306,25 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private JLabel makeChip(String text, Color accent) {
-        JLabel chip = new JLabel(" " + text + " ");
+        Color bg = GhidraTheme.mix(GhidraTheme.cardBackground(), accent, 0.14f);
+        Color border = GhidraTheme.mix(GhidraTheme.borderColor(), accent, 0.28f);
+        JLabel chip = new JLabel(" " + text + " ") {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(bg);
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 8, 8);
+                g2.setColor(border);
+                g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 8, 8);
+                g2.dispose();
+                super.paintComponent(g);
+            }
+        };
         chip.setFont(UI_FONT_SMALL.deriveFont(Font.BOLD));
         chip.setForeground(GhidraTheme.primaryForeground());
-        chip.setOpaque(true);
-        chip.setBackground(GhidraTheme.mix(GhidraTheme.cardBackground(), accent, 0.14f));
-        chip.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(GhidraTheme.mix(GhidraTheme.borderColor(), accent, 0.28f)),
-                BorderFactory.createEmptyBorder(2, 5, 2, 5)));
+        chip.setOpaque(false);
+        chip.setBorder(BorderFactory.createEmptyBorder(3, 7, 3, 7));
         return chip;
     }
 
@@ -337,9 +348,20 @@ public class GhidraTablesEditorFrame extends JFrame {
         JButton btn = new JButton(text);
         btn.setFont(UI_FONT_BOLD);
         btn.setFocusPainted(false);
-        btn.setMargin(new Insets(2, 6, 2, 6));
+        btn.setMargin(new Insets(3, 8, 3, 8));
         btn.setToolTipText(tooltip);
         btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        btn.setBorderPainted(true);
+        btn.addMouseListener(new MouseAdapter() {
+            Color normalBg;
+            @Override public void mouseEntered(MouseEvent e) {
+                normalBg = btn.getBackground();
+                btn.setBackground(GhidraTheme.cardHoverBackground());
+            }
+            @Override public void mouseExited(MouseEvent e) {
+                if (normalBg != null) btn.setBackground(normalBg);
+            }
+        });
         if (al != null) btn.addActionListener(al);
         return btn;
     }
@@ -361,7 +383,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         statusLabel.setFont(UI_FONT_SMALL);
         statusLabel.setOpaque(true);
         statusLabel.setBackground(GhidraTheme.mix(GhidraTheme.surfaceBackground(), GhidraTheme.panelBackground(), 0.5f));
-        statusLabel.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(3, 8, 3, 8));
 
         tableStatsLabel = new JLabel();
         tableStatsLabel.setFont(UI_FONT_SMALL);
@@ -403,7 +425,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         sidebar.setLayout(new BoxLayout(sidebar, BoxLayout.Y_AXIS));
         sidebar.setBackground(GhidraTheme.surfaceBackground());
         sidebar.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(0, 1, 0, 0, GhidraTheme.borderColor()),
+                BorderFactory.createMatteBorder(0, 1, 0, 0, GhidraTheme.subtleBorderColor()),
                 BorderFactory.createEmptyBorder(10, 10, 10, 10)));
         sidebar.setPreferredSize(new Dimension(DEFAULT_INSPECTOR_WIDTH, 0));
 
@@ -445,12 +467,22 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private JComponent buildCollapsibleCard(String title, String summary, JPanel content) {
-        JPanel card = new JPanel(new BorderLayout(0, 6));
+        JPanel card = new JPanel(new BorderLayout(0, 6)) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(getBackground());
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 10, 10);
+                g2.setColor(GhidraTheme.subtleBorderColor());
+                g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 10, 10);
+                g2.dispose();
+            }
+        };
         card.setAlignmentX(0f);
         card.setBackground(GhidraTheme.cardBackground());
-        card.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(GhidraTheme.borderColor()),
-                BorderFactory.createEmptyBorder(8, 12, 8, 12)));
+        card.setOpaque(false);
+        card.setBorder(BorderFactory.createEmptyBorder(8, 12, 8, 12));
 
         JPanel header = new JPanel(new BorderLayout(6, 0));
         header.setOpaque(false);
@@ -574,16 +606,26 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private JComponent buildInspectorCard(String title, JComponent content) {
-        JPanel card = new JPanel(new BorderLayout(0, 10));
+        JPanel card = new JPanel(new BorderLayout(0, 10)) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(getBackground());
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), 10, 10);
+                g2.setColor(GhidraTheme.subtleBorderColor());
+                g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 10, 10);
+                g2.dispose();
+            }
+        };
         card.setAlignmentX(0f);
         card.setBackground(GhidraTheme.cardBackground());
-        card.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(GhidraTheme.borderColor()),
-                BorderFactory.createEmptyBorder(10, 12, 10, 12)));
+        card.setOpaque(false);
+        card.setBorder(BorderFactory.createEmptyBorder(10, 12, 10, 12));
 
         JLabel titleLabel = new JLabel(title);
-        titleLabel.setForeground(GhidraTheme.primaryForeground());
-        titleLabel.setFont(UI_FONT_BOLD);
+        titleLabel.setForeground(GhidraTheme.secondaryForeground());
+        titleLabel.setFont(UI_FONT_SMALL.deriveFont(Font.BOLD));
 
         card.add(titleLabel, BorderLayout.NORTH);
         card.add(content, BorderLayout.CENTER);
@@ -685,6 +727,24 @@ public class GhidraTablesEditorFrame extends JFrame {
         header.setForeground(GhidraTheme.tableHeaderForeground());
         header.setFont(UI_FONT_BOLD);
         header.setReorderingAllowed(false);
+        header.setDefaultRenderer(new DefaultTableCellRenderer() {
+            {
+                setHorizontalAlignment(SwingConstants.CENTER);
+            }
+            @Override
+            public Component getTableCellRendererComponent(JTable t, Object v,
+                    boolean sel, boolean focus, int r, int c) {
+                super.getTableCellRendererComponent(t, v, false, false, r, c);
+                setOpaque(true);
+                setFont(UI_FONT_BOLD);
+                setBackground(GhidraTheme.tableHeaderBackground());
+                setForeground(GhidraTheme.tableHeaderForeground());
+                setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.subtleBorderColor()),
+                        BorderFactory.createEmptyBorder(3, 4, 3, 4)));
+                return this;
+            }
+        });
 
         renderer = new HeatMapCellRenderer() {
             @Override
@@ -1149,8 +1209,6 @@ public class GhidraTablesEditorFrame extends JFrame {
         rh.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             {
                 setHorizontalAlignment(SwingConstants.CENTER);
-                setBackground(GhidraTheme.tableHeaderBackground());
-                setForeground(GhidraTheme.tableHeaderForeground());
                 setFont(UI_FONT_BOLD);
             }
             @Override
@@ -1158,7 +1216,13 @@ public class GhidraTablesEditorFrame extends JFrame {
                     boolean s, boolean f, int r, int c) {
                 super.getTableCellRendererComponent(t, v, false, false, r, c);
                 setOpaque(true);
-                setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.tableGridColor()));
+                setForeground(GhidraTheme.tableHeaderForeground());
+                setBackground(r % 2 == 0
+                        ? GhidraTheme.tableHeaderStripeBackground()
+                        : GhidraTheme.tableHeaderBackground());
+                setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.subtleBorderColor()),
+                        BorderFactory.createEmptyBorder(0, 4, 0, 4)));
                 return this;
             }
         });
@@ -1185,8 +1249,6 @@ public class GhidraTablesEditorFrame extends JFrame {
         rh.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             {
                 setHorizontalAlignment(SwingConstants.CENTER);
-                setBackground(GhidraTheme.tableHeaderBackground());
-                setForeground(GhidraTheme.tableHeaderForeground());
                 setFont(UI_FONT_BOLD);
             }
             @Override
@@ -1194,7 +1256,13 @@ public class GhidraTablesEditorFrame extends JFrame {
                     boolean s, boolean f, int r, int c) {
                 super.getTableCellRendererComponent(t, v, false, false, r, c);
                 setOpaque(true);
-                setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.tableGridColor()));
+                setForeground(GhidraTheme.tableHeaderForeground());
+                setBackground(r % 2 == 0
+                        ? GhidraTheme.tableHeaderStripeBackground()
+                        : GhidraTheme.tableHeaderBackground());
+                setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.subtleBorderColor()),
+                        BorderFactory.createEmptyBorder(0, 4, 0, 4)));
                 return this;
             }
         });
@@ -1209,7 +1277,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         l.setForeground(GhidraTheme.secondaryForeground());
         l.setBackground(GhidraTheme.surfaceBackground());
         l.setOpaque(true);
-        l.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.tableGridColor()));
+        l.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, GhidraTheme.subtleBorderColor()));
         return l;
     }
 
@@ -1445,8 +1513,20 @@ public class GhidraTablesEditorFrame extends JFrame {
         f.setCaretColor(GhidraTheme.textFieldCaret());
         f.setFont(GhidraTheme.textFieldFont());
         f.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(GhidraTheme.borderColor()),
-                BorderFactory.createEmptyBorder(2, 4, 2, 4)));
+                BorderFactory.createLineBorder(GhidraTheme.subtleBorderColor()),
+                BorderFactory.createEmptyBorder(4, 6, 4, 6)));
+        f.addFocusListener(new FocusAdapter() {
+            @Override public void focusGained(FocusEvent e) {
+                f.setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(GhidraTheme.focusRingColor()),
+                        BorderFactory.createEmptyBorder(4, 6, 4, 6)));
+            }
+            @Override public void focusLost(FocusEvent e) {
+                f.setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(GhidraTheme.subtleBorderColor()),
+                        BorderFactory.createEmptyBorder(4, 6, 4, 6)));
+            }
+        });
         return f;
     }
 

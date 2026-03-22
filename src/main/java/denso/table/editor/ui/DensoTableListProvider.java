@@ -144,8 +144,8 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         JPanel panel = new JPanel(new BorderLayout(10, 0));
         panel.setBackground(GhidraTheme.surfaceBackground());
         panel.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(0, 0, 1, 0, GhidraTheme.borderColor()),
-                BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+                BorderFactory.createMatteBorder(0, 0, 1, 0, GhidraTheme.subtleBorderColor()),
+                BorderFactory.createEmptyBorder(10, 12, 10, 12)));
 
         JLabel title = new JLabel("GhidraTables");
         title.setForeground(GhidraTheme.primaryForeground());
@@ -183,8 +183,9 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         jt.setSelectionBackground(GhidraTheme.tableSelectionBackground());
         jt.setSelectionForeground(GhidraTheme.tableSelectionForeground());
         jt.setShowVerticalLines(false);
+        jt.setShowHorizontalLines(false);
         jt.setIntercellSpacing(new Dimension(0, 1));
-        jt.setRowHeight(24);
+        jt.setRowHeight(26);
         jt.setFont(GhidraTheme.tableFont());
         jt.getTableHeader().setBackground(GhidraTheme.tableHeaderBackground());
         jt.getTableHeader().setForeground(GhidraTheme.tableHeaderForeground());
@@ -219,8 +220,8 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         JPanel p = new JPanel(new BorderLayout());
         p.setBackground(GhidraTheme.surfaceBackground());
         p.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(1, 0, 0, 0, GhidraTheme.borderColor()),
-                BorderFactory.createEmptyBorder(5, 8, 4, 8)));
+                BorderFactory.createMatteBorder(1, 0, 0, 0, GhidraTheme.subtleBorderColor()),
+                BorderFactory.createEmptyBorder(6, 10, 5, 10)));
 
         statusLabel = new JLabel("No program loaded - click Scan to begin.");
         statusLabel.setForeground(GhidraTheme.primaryForeground());

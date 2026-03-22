@@ -20,6 +20,8 @@ final class GhidraTheme {
 
     private GhidraTheme() {}
 
+    // ── Fonts ─────────────────────────────────────────────────────────────────
+
     static Font labelFont() {
         return font("Label.font", FALLBACK_FONT);
     }
@@ -50,6 +52,8 @@ final class GhidraTheme {
         return font("TextField.font", labelFont());
     }
 
+    // ── Core panel colours ────────────────────────────────────────────────────
+
     static Color panelBackground() {
         return color("Panel.background", GThemeDefaults.Colors.BACKGROUND);
     }
@@ -61,6 +65,13 @@ final class GhidraTheme {
     static Color cardBackground() {
         return shift(panelBackground(), Gui.isDarkTheme() ? 0.07f : -0.05f);
     }
+
+    /** A subtler card variant for hover/active states on cards. */
+    static Color cardHoverBackground() {
+        return shift(cardBackground(), Gui.isDarkTheme() ? 0.03f : -0.02f);
+    }
+
+    // ── Text colours ──────────────────────────────────────────────────────────
 
     static Color primaryForeground() {
         return color("Label.foreground", GThemeDefaults.Colors.FOREGROUND);
@@ -78,10 +89,38 @@ final class GhidraTheme {
         return GThemeDefaults.Colors.Messages.ERROR;
     }
 
+    /** A muted accent – useful for subtle badges, status dots, etc. */
+    static Color accentColor() {
+        return Gui.isDarkTheme()
+            ? new Color(100, 160, 255)
+            : new Color(40, 100, 210);
+    }
+
+    /** Accent for "success" indications (save confirmation, valid input). */
+    static Color successColor() {
+        return Gui.isDarkTheme()
+            ? new Color(90, 200, 130)
+            : new Color(30, 140, 70);
+    }
+
+    // ── Borders & dividers ────────────────────────────────────────────────────
+
     static Color borderColor() {
         return color("Separator.foreground",
             color("controlShadow", GThemeDefaults.Colors.BORDER));
     }
+
+    /** A softer border for inner dividers (grid lines, card separators). */
+    static Color subtleBorderColor() {
+        return mix(borderColor(), panelBackground(), 0.45f);
+    }
+
+    /** Focus ring colour derived from the theme's selection colour. */
+    static Color focusRingColor() {
+        return withAlpha(tableSelectionBackground(), 180);
+    }
+
+    // ── Table colours ─────────────────────────────────────────────────────────
 
     static Color tableBackground() {
         return color("Table.background", panelBackground());
@@ -95,7 +134,7 @@ final class GhidraTheme {
         if (Gui.hasColor("color.bg.table.grid")) {
             return Gui.getColor("color.bg.table.grid");
         }
-        return color("Table.gridColor", borderColor());
+        return mix(color("Table.gridColor", borderColor()), panelBackground(), 0.30f);
     }
 
     static Color tableSelectionBackground() {
@@ -119,6 +158,13 @@ final class GhidraTheme {
         return color("TableHeader.foreground", primaryForeground());
     }
 
+    /** A subtle stripe for alternating row headers, improving scanability. */
+    static Color tableHeaderStripeBackground() {
+        return shift(tableHeaderBackground(), Gui.isDarkTheme() ? 0.025f : -0.02f);
+    }
+
+    // ── Text field colours ────────────────────────────────────────────────────
+
     static Color textFieldBackground() {
         return color("TextField.background", shift(panelBackground(), 0.10f));
     }
@@ -138,6 +184,8 @@ final class GhidraTheme {
         return mix(textFieldBackground(), errorForeground(), 0.18f);
     }
 
+    // ── Colour utilities ──────────────────────────────────────────────────────
+
     static Color mix(Color base, Color overlay, float amount) {
         float clamped = Math.max(0f, Math.min(1f, amount));
         float keep = 1f - clamped;
@@ -147,7 +195,13 @@ final class GhidraTheme {
         return new Color(r, g, b);
     }
 
-    private static Color shift(Color base, float amount) {
+    /** Returns a copy of {@code c} with the given alpha (0–255). */
+    static Color withAlpha(Color c, int alpha) {
+        return new Color(c.getRed(), c.getGreen(), c.getBlue(),
+            Math.max(0, Math.min(255, alpha)));
+    }
+
+    static Color shift(Color base, float amount) {
         return amount >= 0f
             ? mix(base, Color.WHITE, amount)
             : mix(base, Color.BLACK, -amount);

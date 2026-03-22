@@ -42,7 +42,9 @@ public class MultiEditTableCellEditor extends AbstractCellEditor
         field.setBackground(GhidraTheme.textFieldBackground());
         field.setForeground(GhidraTheme.textFieldForeground());
         field.setCaretColor(GhidraTheme.textFieldCaret());
-        field.setBorder(BorderFactory.createLineBorder(GhidraTheme.tableSelectionBackground(), 2));
+        field.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(GhidraTheme.focusRingColor(), 2),
+                BorderFactory.createEmptyBorder(1, 3, 1, 3)));
 
         // Commit on Enter, cancel on Escape
         field.addActionListener(e -> stopCellEditing());
