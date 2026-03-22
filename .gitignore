@@ -1,0 +1,14 @@
+/.claude/
+/.gradle/
+/bin/
+/build/
+/dist/
+.classpath
+.idea/
+*.iml
+*.log
+.project
+.settings/
+.vscode/
+.DS_Store
+.claude/settings.local.json
