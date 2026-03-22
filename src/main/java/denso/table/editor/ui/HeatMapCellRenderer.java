@@ -8,6 +8,8 @@ import java.awt.*;
 import javax.swing.*;
 import javax.swing.table.DefaultTableCellRenderer;
 
+import generic.theme.Gui;
+
 /**
  * A {@link javax.swing.table.TableCellRenderer} that colours data cells using
  * a blue→cyan→green→yellow→red heat-map gradient, and renders axis header
@@ -100,7 +102,7 @@ public class HeatMapCellRenderer extends DefaultTableCellRenderer {
 
     /**
      * Maps a normalised value [0,1] to a blue → cyan → green → yellow → red
-     * heat-map colour.
+     * heat-map colour, adjusted for the current dark/light theme.
      */
     public static Color heatColor(double t) {
         t = Math.max(0, Math.min(1, t));
@@ -127,7 +129,15 @@ public class HeatMapCellRenderer extends DefaultTableCellRenderer {
             g = (int) (255 * (1 - s));
             b = 0;
         }
-        return new Color(r, g, b);
+        Color raw = new Color(r, g, b);
+
+        // Adjust for dark themes: slightly desaturate and brighten to avoid
+        // washing out against dark backgrounds
+        if (Gui.isDarkTheme()) {
+            Color bg = GhidraTheme.tableBackground();
+            return blend(raw, bg, 0.12f);
+        }
+        return raw;
     }
 
     /** Returns true if the colour is perceived as dark. */
