@@ -10,6 +10,7 @@ import java.io.*;
 import java.util.Arrays;
 import java.util.DoubleSummaryStatistics;
 import java.util.List;
+import java.util.Locale;
 import javax.swing.*;
 import javax.swing.event.*;
 import javax.swing.table.*;
@@ -38,6 +39,50 @@ public class GhidraTablesEditorFrame extends JFrame {
     private static final Font UI_FONT_SMALL  = GhidraTheme.smallFont();
     private static final Font UI_FONT_BOLD   = GhidraTheme.boldFont();
     private static final Font UI_FONT_TITLE  = GhidraTheme.titleFont();
+    private static final int DEFAULT_INSPECTOR_WIDTH = 248;
+
+    private enum TableDensity {
+        AUTO("Auto"),
+        COMPACT("Compact"),
+        COMFORTABLE("Comfortable");
+
+        private final String label;
+
+        TableDensity(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private enum OperationAxis {
+        AUTO("Auto"),
+        ROWS("Rows"),
+        COLUMNS("Columns");
+
+        private final String label;
+
+        OperationAxis(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private static final class OperationStats {
+        int spans;
+        int cells;
+
+        boolean changed() {
+            return cells > 0;
+        }
+    }
 
     // ── Model ─────────────────────────────────────────────────────────────────
     private final DensoTable table;
@@ -51,15 +96,23 @@ public class GhidraTablesEditorFrame extends JFrame {
     private AbstractTableModel rowHeaderModel;
     private HeatMapCellRenderer renderer;
     private MultiEditTableCellEditor editor;
+    private JScrollPane tableScrollPane;
+    private JScrollPane inspectorScrollPane;
+    private JSplitPane splitPane;
+    private JLabel cornerLabel;
 
     private JLabel statusLabel;
-    private JLabel selectionSummaryLabel;
+    private JTextArea selectionSummaryLabel;
+    private JLabel tableStatsLabel;
     private JButton saveBtn;
     private JButton revertBtn;
+    private JToggleButton inspectorToggle;
+    private JComboBox<TableDensity> densityCombo;
+    private JComboBox<OperationAxis> axisCombo;
 
     private JTextField multField;
     private JTextField offField;
-    private JLabel macExprLabel;
+    private JTextArea macExprLabel;
 
     /** True whenever in-memory state differs from the last saved ROM state. */
     private boolean dirty = false;
@@ -69,6 +122,10 @@ public class GhidraTablesEditorFrame extends JFrame {
      * suppress the dirty-marking side-effect of fireTableDataChanged.
      */
     private boolean loading = false;
+    private int currentCellWidth = 72;
+    private int currentRowHeight = 26;
+    private int currentRowHeaderWidth = 72;
+    private int lastDividerLocation = -1;
 
     // ── Construction ──────────────────────────────────────────────────────────
 
@@ -90,6 +147,15 @@ public class GhidraTablesEditorFrame extends JFrame {
         add(buildCenterPanel(), BorderLayout.CENTER);
         add(buildActionBar(),   BorderLayout.SOUTH);
 
+        addComponentListener(new ComponentAdapter() {
+            @Override public void componentResized(ComponentEvent e) {
+                SwingUtilities.invokeLater(() -> {
+                    applyTableDensity();
+                    restoreInspectorLayout();
+                });
+            }
+        });
+
         // Always read fresh from ROM so the display is never stale from scan data
         loadFromRom();
         syncMacUi();
@@ -102,6 +168,15 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         if (owner != null) setLocationRelativeTo(owner);
         else               setLocationByPlatform(true);
+
+        SwingUtilities.invokeLater(() -> {
+            restoreInspectorLayout();
+            applyTableDensity();
+            if (isLargeTable()) {
+                setInspectorVisible(false);
+            }
+            updateStatus();
+        });
     }
 
     // =========================================================================
@@ -153,24 +228,24 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         JPanel chips = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
         chips.setOpaque(false);
-        chips.add(makeChip(table.is2D() ? "2D" : "1D"));
-        chips.add(makeChip(table.getDimensions()));
-        chips.add(makeChip(table.getDataType().getDisplayName()));
-        if (table.isHasMAC()) chips.add(makeChip("MAC"));
+        chips.add(makeChip(table.is2D() ? "2D" : "1D", GhidraTheme.secondaryForeground()));
+        chips.add(makeChip(table.getDimensions(), GhidraTheme.tableSelectionBackground()));
+        chips.add(makeChip(table.getDataType().getDisplayName(), GhidraTheme.linkForeground()));
+        if (table.isHasMAC()) chips.add(makeChip("MAC", GhidraTheme.linkForeground()));
 
         bar.add(titleBox, BorderLayout.WEST);
         bar.add(chips,    BorderLayout.EAST);
         return bar;
     }
 
-    private JLabel makeChip(String text) {
+    private JLabel makeChip(String text, Color accent) {
         JLabel chip = new JLabel(" " + text + " ");
         chip.setFont(UI_FONT_SMALL.deriveFont(Font.BOLD));
         chip.setForeground(GhidraTheme.primaryForeground());
         chip.setOpaque(true);
-        chip.setBackground(GhidraTheme.cardBackground());
+        chip.setBackground(GhidraTheme.mix(GhidraTheme.cardBackground(), accent, 0.14f));
         chip.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(GhidraTheme.borderColor()),
+                BorderFactory.createLineBorder(GhidraTheme.mix(GhidraTheme.borderColor(), accent, 0.28f)),
                 BorderFactory.createEmptyBorder(2, 5, 2, 5)));
         return chip;
     }
@@ -222,11 +297,87 @@ public class GhidraTablesEditorFrame extends JFrame {
     // =========================================================================
 
     private JComponent buildCenterPanel() {
-        JPanel center = new JPanel(new BorderLayout());
-        center.setBackground(GhidraTheme.panelBackground());
-        center.add(buildTablePanel(), BorderLayout.CENTER);
-        center.add(buildInspectorPanel(), BorderLayout.EAST);
-        return center;
+        JPanel workspace = new JPanel(new BorderLayout());
+        workspace.setBackground(GhidraTheme.panelBackground());
+        workspace.add(buildTableToolBar(), BorderLayout.NORTH);
+        workspace.add(buildTablePanel(), BorderLayout.CENTER);
+
+        inspectorScrollPane = new JScrollPane(buildInspectorPanel());
+        inspectorScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        inspectorScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        inspectorScrollPane.getViewport().setBackground(GhidraTheme.surfaceBackground());
+
+        splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, workspace, inspectorScrollPane);
+        splitPane.setBorder(BorderFactory.createEmptyBorder());
+        splitPane.setResizeWeight(1.0);
+        splitPane.setContinuousLayout(true);
+        splitPane.setOneTouchExpandable(true);
+        splitPane.setDividerSize(Math.max(8, UIManager.getInt("SplitPane.dividerSize")));
+        return splitPane;
+    }
+
+    private JComponent buildTableToolBar() {
+        JPanel bar = new JPanel(new BorderLayout(10, 0));
+        bar.setBackground(GhidraTheme.surfaceBackground());
+        bar.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, GhidraTheme.borderColor()),
+                BorderFactory.createEmptyBorder(7, 10, 7, 10)));
+
+        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        controls.setOpaque(false);
+
+        JButton interpBtn = makeBtn("Interpolate", e -> interpolateSelected());
+        JButton smoothBtn = makeBtn("Smooth", e -> smoothSelected());
+        JButton exportBtn = makeBtn("Export CSV", e -> exportCsv());
+        JButton structureBtn = makeBtn("Apply Structure", e -> createStructure());
+
+        interpBtn.setToolTipText("Interpolates between the first and last selected values along the chosen axis.");
+        smoothBtn.setToolTipText("Applies a single-pass 3-point average along the chosen axis.");
+
+        densityCombo = new JComboBox<>(TableDensity.values());
+        densityCombo.setSelectedItem(TableDensity.AUTO);
+        densityCombo.setFont(GhidraTheme.labelFont());
+        densityCombo.setToolTipText("Auto shrinks large tables to fit more data in the current window.");
+        densityCombo.addActionListener(e -> applyTableDensity());
+
+        axisCombo = new JComboBox<>(table.is2D()
+                ? OperationAxis.values()
+                : new OperationAxis[]{OperationAxis.ROWS});
+        axisCombo.setSelectedItem(table.is2D() ? OperationAxis.AUTO : OperationAxis.ROWS);
+        axisCombo.setFont(GhidraTheme.labelFont());
+        axisCombo.setToolTipText("Choose whether interpolate and smooth operate across rows or columns.");
+
+        inspectorToggle = new JToggleButton("Inspector", true);
+        inspectorToggle.setFont(GhidraTheme.labelFont());
+        inspectorToggle.addActionListener(e -> setInspectorVisible(inspectorToggle.isSelected()));
+
+        controls.add(interpBtn);
+        controls.add(smoothBtn);
+        controls.add(exportBtn);
+        controls.add(structureBtn);
+        controls.add(Box.createHorizontalStrut(10));
+        controls.add(makeToolbarLabel("Density"));
+        controls.add(densityCombo);
+        if (table.is2D()) {
+            controls.add(makeToolbarLabel("Axis"));
+            controls.add(axisCombo);
+        }
+        controls.add(inspectorToggle);
+
+        tableStatsLabel = new JLabel();
+        tableStatsLabel.setFont(UI_FONT_SMALL);
+        tableStatsLabel.setForeground(GhidraTheme.secondaryForeground());
+
+        bar.add(controls, BorderLayout.WEST);
+        bar.add(tableStatsLabel, BorderLayout.EAST);
+        return bar;
+    }
+
+    private JLabel makeToolbarLabel(String text) {
+        JLabel label = new JLabel(text);
+        label.setFont(UI_FONT_SMALL);
+        label.setForeground(GhidraTheme.secondaryForeground());
+        return label;
     }
 
     // =========================================================================
@@ -240,11 +391,9 @@ public class GhidraTablesEditorFrame extends JFrame {
         sidebar.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createMatteBorder(0, 1, 0, 0, GhidraTheme.borderColor()),
                 BorderFactory.createEmptyBorder(10, 10, 10, 10)));
-        sidebar.setPreferredSize(new Dimension(260, 0));
+        sidebar.setPreferredSize(new Dimension(DEFAULT_INSPECTOR_WIDTH, 0));
 
         sidebar.add(buildOverviewCard());
-        sidebar.add(Box.createVerticalStrut(10));
-        sidebar.add(buildToolCard());
         sidebar.add(Box.createVerticalStrut(10));
         sidebar.add(buildSelectionCard());
         if (table.isHasMAC()) {
@@ -266,39 +415,9 @@ public class GhidraTablesEditorFrame extends JFrame {
             content.add(buildMetaRow("Y Points",
                     Integer.toString(((DensoTable2D) table).getCountY())));
         }
+        content.add(buildMetaRow("Header", table.getAddressHex()));
         content.add(buildMetaRow("MAC", table.isHasMAC() ? table.getMacExpression() : "None"));
         return buildInspectorCard("Overview", content);
-    }
-
-    private JComponent buildToolCard() {
-        JPanel content = new JPanel();
-        content.setOpaque(false);
-        content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
-
-        JButton interpBtn = makeBtn("Interpolate", e -> interpolateSelected());
-        JButton smoothBtn = makeBtn("Smooth", e -> smoothSelected());
-        JButton exportBtn = makeBtn("Export CSV", e -> exportCsv());
-        JButton structureBtn = makeBtn("Apply Structure", e -> createStructure());
-
-        interpBtn.setToolTipText("Linearly interpolate between the first and last selected values in each row");
-        smoothBtn.setToolTipText("Apply a single 3-point average pass to the selected interior cells");
-
-        for (JButton btn : new JButton[]{interpBtn, smoothBtn, exportBtn, structureBtn}) {
-            btn.setAlignmentX(0f);
-            btn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
-            content.add(btn);
-            content.add(Box.createVerticalStrut(6));
-        }
-
-        JLabel hint = new JLabel("<html><div style='width:200px'>Wheel edits selected data cells directly. " +
-                "Shift = 10, Ctrl = 0.1, Ctrl+Shift = 0.01.</div></html>");
-        hint.setAlignmentX(0f);
-        hint.setForeground(GhidraTheme.secondaryForeground());
-        hint.setFont(UI_FONT_SMALL);
-        content.add(Box.createVerticalStrut(4));
-        content.add(hint);
-
-        return buildInspectorCard("Tools", content);
     }
 
     private JComponent buildSelectionCard() {
@@ -306,15 +425,15 @@ public class GhidraTablesEditorFrame extends JFrame {
         content.setOpaque(false);
         content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
 
-        selectionSummaryLabel = new JLabel();
+        selectionSummaryLabel = makeWrappedTextArea(
+                "", GhidraTheme.labelFont(), GhidraTheme.primaryForeground());
         selectionSummaryLabel.setAlignmentX(0f);
-        selectionSummaryLabel.setForeground(GhidraTheme.primaryForeground());
-        selectionSummaryLabel.setFont(GhidraTheme.labelFont());
 
-        JLabel hint = new JLabel("<html><div style='width:200px'>Select cells, then drag the wheel, interpolate, or smooth.</div></html>");
+        JTextArea hint = makeWrappedTextArea(
+                "Select cells, then use the top toolbar to interpolate or smooth. " +
+                "Auto density and hiding the inspector help on larger maps.",
+                UI_FONT_SMALL, GhidraTheme.secondaryForeground());
         hint.setAlignmentX(0f);
-        hint.setForeground(GhidraTheme.secondaryForeground());
-        hint.setFont(UI_FONT_SMALL);
 
         content.add(selectionSummaryLabel);
         content.add(Box.createVerticalStrut(8));
@@ -346,10 +465,11 @@ public class GhidraTablesEditorFrame extends JFrame {
         offField.setAlignmentX(0f);
         offField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
 
-        macExprLabel = new JLabel(table.getMacExpression());
+        macExprLabel = makeWrappedTextArea(
+                table.getMacExpression(),
+                UI_FONT_SMALL.deriveFont(Font.ITALIC),
+                GhidraTheme.secondaryForeground());
         macExprLabel.setAlignmentX(0f);
-        macExprLabel.setForeground(GhidraTheme.secondaryForeground());
-        macExprLabel.setFont(UI_FONT_SMALL.deriveFont(Font.ITALIC));
 
         ActionListener commit = e -> commitMacFields();
         multField.addActionListener(commit);
@@ -392,22 +512,41 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private JComponent buildMetaRow(String key, String value) {
-        JPanel row = new JPanel(new BorderLayout(8, 0));
+        JPanel row = new JPanel();
         row.setOpaque(false);
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
+        row.setLayout(new BoxLayout(row, BoxLayout.Y_AXIS));
+        row.setAlignmentX(0f);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 
         JLabel keyLabel = new JLabel(key);
         keyLabel.setForeground(GhidraTheme.secondaryForeground());
         keyLabel.setFont(UI_FONT_SMALL);
+        keyLabel.setAlignmentX(0f);
 
-        JLabel valueLabel = new JLabel(value);
-        valueLabel.setForeground(GhidraTheme.primaryForeground());
-        valueLabel.setFont(UI_FONT_SMALL);
-        valueLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+        JTextArea valueLabel = makeWrappedTextArea(
+                value, UI_FONT_SMALL, GhidraTheme.primaryForeground());
+        valueLabel.setAlignmentX(0f);
 
-        row.add(keyLabel, BorderLayout.WEST);
-        row.add(valueLabel, BorderLayout.EAST);
+        row.add(keyLabel);
+        row.add(Box.createVerticalStrut(2));
+        row.add(valueLabel);
+        row.add(Box.createVerticalStrut(6));
         return row;
+    }
+
+    private JTextArea makeWrappedTextArea(String text, Font font, Color color) {
+        JTextArea area = new JTextArea(text);
+        area.setEditable(false);
+        area.setFocusable(false);
+        area.setOpaque(false);
+        area.setWrapStyleWord(true);
+        area.setLineWrap(true);
+        area.setForeground(color);
+        area.setFont(font);
+        area.setBorder(BorderFactory.createEmptyBorder());
+        area.setAlignmentX(0f);
+        area.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        return area;
     }
 
     // =========================================================================
@@ -422,22 +561,28 @@ public class GhidraTablesEditorFrame extends JFrame {
         grid = new JTable(tableModel);
         configureGrid();
 
-        JScrollPane scroll = new JScrollPane(grid);
-        scroll.setBackground(GhidraTheme.tableBackground());
-        scroll.getViewport().setBackground(GhidraTheme.tableBackground());
-        scroll.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+        tableScrollPane = new JScrollPane(grid);
+        tableScrollPane.setBackground(GhidraTheme.tableBackground());
+        tableScrollPane.getViewport().setBackground(GhidraTheme.tableBackground());
+        tableScrollPane.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+        tableScrollPane.getViewport().addComponentListener(new ComponentAdapter() {
+            @Override public void componentResized(ComponentEvent e) {
+                SwingUtilities.invokeLater(GhidraTablesEditorFrame.this::applyTableDensity);
+            }
+        });
 
         if (table.is2D()) {
             rowHeaderTable = buildRowHeader((DensoTable2D) table);
-            scroll.setRowHeaderView(rowHeaderTable);
-            scroll.setCorner(JScrollPane.UPPER_LEFT_CORNER, buildCornerLabel());
+            tableScrollPane.setRowHeaderView(rowHeaderTable);
+            cornerLabel = buildCornerLabel();
+            tableScrollPane.setCorner(JScrollPane.UPPER_LEFT_CORNER, cornerLabel);
         }
         else {
             rowHeaderTable = buildRowHeader((DensoTable1D) table);
-            scroll.setRowHeaderView(rowHeaderTable);
+            tableScrollPane.setRowHeaderView(rowHeaderTable);
         }
 
-        return scroll;
+        return tableScrollPane;
     }
 
     private void configureGrid() {
@@ -448,7 +593,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         grid.setSelectionForeground(GhidraTheme.tableSelectionForeground());
         grid.setShowVerticalLines(false);
         grid.setIntercellSpacing(new Dimension(0, 1));
-        grid.setRowHeight(26);
+        grid.setRowHeight(currentRowHeight);
         grid.setFont(UI_FONT);
         grid.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         grid.setCellSelectionEnabled(true);
@@ -465,8 +610,6 @@ public class GhidraTablesEditorFrame extends JFrame {
             @Override
             protected CellRole getRoleFor(int row, int col) {
                 if (table.is2D()) {
-                    if (row == 0 && col == 0) return CellRole.CORNER;
-                    if (row == 0)             return CellRole.X_HEADER;
                     return CellRole.DATA;
                 } else {
                     if (row == 0) return CellRole.X_HEADER;
@@ -492,6 +635,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         tableModel.addTableModelListener(e -> {
             refreshHeatRange();
             if (!loading) markDirty();
+            updateTableStats();
         });
 
         // ── Scroll wheel: adjust selected data cells ──────────────────────────
@@ -543,6 +687,8 @@ public class GhidraTablesEditorFrame extends JFrame {
             @Override public void mousePressed(MouseEvent e)  { if (e.isPopupTrigger()) cellMenu.show(grid, e.getX(), e.getY()); }
             @Override public void mouseReleased(MouseEvent e) { if (e.isPopupTrigger()) cellMenu.show(grid, e.getX(), e.getY()); }
         });
+
+        updateTableStats();
     }
 
     // =========================================================================
@@ -554,8 +700,7 @@ public class GhidraTablesEditorFrame extends JFrame {
      */
     private double getRawValue(int modelRow, int modelCol) {
         if (table.is2D()) {
-            if (modelRow < 1) return Double.NaN;
-            return ((DensoTable2D) table).getZ(modelRow - 1, modelCol);
+            return ((DensoTable2D) table).getZ(modelRow, modelCol);
         } else {
             if (modelRow != 1) return Double.NaN;
             double[] ys = ((DensoTable1D) table).getValuesY();
@@ -566,7 +711,7 @@ public class GhidraTablesEditorFrame extends JFrame {
     /** Sets the raw value at the given model cell. */
     private void setRawValue(int modelRow, int modelCol, double raw) {
         if (table.is2D()) {
-            if (modelRow >= 1) ((DensoTable2D) table).setZ(modelRow - 1, modelCol, raw);
+            ((DensoTable2D) table).setZ(modelRow, modelCol, raw);
         } else {
             if (modelRow == 1) {
                 double[] ys = ((DensoTable1D) table).getValuesY();
@@ -583,6 +728,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         int[] selRows = grid.getSelectedRows();
         int[] selCols = grid.getSelectedColumns();
         tableModel.fireTableDataChanged();  // triggers refreshHeatRange + markDirty via listener
+        grid.clearSelection();
         for (int r : selRows) grid.addRowSelectionInterval(r, r);
         for (int c : selCols) grid.addColumnSelectionInterval(c, c);
     }
@@ -608,7 +754,12 @@ public class GhidraTablesEditorFrame extends JFrame {
                 changed = true;
             }
         }
-        if (changed) fireAndRestoreSelection();
+        if (changed) {
+            fireAndRestoreSelection();
+            int modified = countEditableSelectedCells();
+            statusLabel.setText(String.format("Adjusted %d selected cell%s.",
+                    modified, modified == 1 ? "" : "s"));
+        }
     }
 
     /**
@@ -616,34 +767,24 @@ public class GhidraTablesEditorFrame extends JFrame {
      * each selected data row.  All selected cells in between are overwritten.
      */
     private void interpolateSelected() {
-        int[] viewRows = grid.getSelectedRows();
-        int[] viewCols = grid.getSelectedColumns();
-        if (viewCols.length < 2) return;
-
-        int[] modelCols = Arrays.stream(viewCols)
-                .map(c -> grid.convertColumnIndexToModel(c))
-                .sorted()
-                .toArray();
-
-        boolean changed = false;
-        for (int vr : viewRows) {
-            int mr = grid.convertRowIndexToModel(vr);
-            if (!tableModel.isCellEditable(mr, modelCols[0])) continue;
-
-            int cFirst = modelCols[0];
-            int cLast  = modelCols[modelCols.length - 1];
-            double physFirst = table.toPhysical(getRawValue(mr, cFirst));
-            double physLast  = table.toPhysical(getRawValue(mr, cLast));
-
-            for (int mc : modelCols) {
-                double t = (cFirst == cLast) ? 0
-                        : (double)(mc - cFirst) / (cLast - cFirst);
-                double interp = physFirst + t * (physLast - physFirst);
-                setRawValue(mr, mc, table.toRaw(interp));
-            }
-            changed = true;
+        OperationAxis axis = resolveOperationAxis(false);
+        if (axis == null) {
+            return;
         }
-        if (changed) fireAndRestoreSelection();
+
+        OperationStats stats = switch (axis) {
+            case ROWS -> interpolateRows();
+            case COLUMNS -> interpolateColumns();
+            default -> new OperationStats();
+        };
+
+        if (!stats.changed()) {
+            return;
+        }
+
+        fireAndRestoreSelection();
+        statusLabel.setText(String.format("Interpolated %d span%s across %s.",
+                stats.spans, stats.spans == 1 ? "" : "s", axis == OperationAxis.ROWS ? "rows" : "columns"));
     }
 
     /**
@@ -651,34 +792,208 @@ public class GhidraTablesEditorFrame extends JFrame {
      * each selected data row. Endpoint cells are held fixed as anchors.
      */
     private void smoothSelected() {
-        int[] viewRows = grid.getSelectedRows();
-        int[] viewCols = grid.getSelectedColumns();
-        if (viewCols.length < 3) {
-            statusLabel.setText("Select at least 3 cells to smooth.");
+        OperationAxis axis = resolveOperationAxis(false);
+        if (axis == null) {
             return;
         }
 
-        int[] modelCols = Arrays.stream(viewCols)
-                .map(c -> grid.convertColumnIndexToModel(c))
-                .sorted()
-                .toArray();
+        OperationStats stats = switch (axis) {
+            case ROWS -> smoothRows();
+            case COLUMNS -> smoothColumns();
+            default -> new OperationStats();
+        };
 
-        boolean changed = false;
-        for (int vr : viewRows) {
-            int mr = grid.convertRowIndexToModel(vr);
-            if (!tableModel.isCellEditable(mr, modelCols[0])) continue;
-
-            double[] phys = new double[modelCols.length];
-            for (int ci = 0; ci < modelCols.length; ci++) {
-                phys[ci] = table.toPhysical(getRawValue(mr, modelCols[ci]));
-            }
-            for (int ci = 1; ci < modelCols.length - 1; ci++) {
-                double smoothed = (phys[ci - 1] + phys[ci] + phys[ci + 1]) / 3.0;
-                setRawValue(mr, modelCols[ci], table.toRaw(smoothed));
-            }
-            changed = true;
+        if (!stats.changed()) {
+            return;
         }
-        if (changed) fireAndRestoreSelection();
+
+        fireAndRestoreSelection();
+        statusLabel.setText(String.format("Smoothed %d span%s across %s.",
+                stats.spans, stats.spans == 1 ? "" : "s", axis == OperationAxis.ROWS ? "rows" : "columns"));
+    }
+
+    private OperationStats interpolateRows() {
+        OperationStats stats = new OperationStats();
+        int[] modelCols = getSelectedModelColumns();
+        int[] modelRows = getSelectedEditableModelRows();
+        if (modelCols.length < 2 || modelRows.length == 0) {
+            statusLabel.setText("Select at least 2 editable cells in one row to interpolate.");
+            return stats;
+        }
+
+        int cFirst = modelCols[0];
+        int cLast = modelCols[modelCols.length - 1];
+        for (int mr : modelRows) {
+            if (!tableModel.isCellEditable(mr, cFirst) || !tableModel.isCellEditable(mr, cLast)) {
+                continue;
+            }
+            double physFirst = table.toPhysical(getRawValue(mr, cFirst));
+            double physLast = table.toPhysical(getRawValue(mr, cLast));
+            for (int mc = cFirst; mc <= cLast; mc++) {
+                if (!tableModel.isCellEditable(mr, mc)) {
+                    continue;
+                }
+                double t = (cFirst == cLast) ? 0.0 : (double) (mc - cFirst) / (cLast - cFirst);
+                setRawValue(mr, mc, table.toRaw(physFirst + t * (physLast - physFirst)));
+                stats.cells++;
+            }
+            stats.spans++;
+        }
+        return stats;
+    }
+
+    private OperationStats interpolateColumns() {
+        OperationStats stats = new OperationStats();
+        int[] modelCols = getSelectedModelColumns();
+        int[] modelRows = getSelectedEditableModelRows();
+        if (modelCols.length == 0 || modelRows.length < 2) {
+            statusLabel.setText("Select at least 2 editable cells in one column to interpolate.");
+            return stats;
+        }
+
+        int rFirst = modelRows[0];
+        int rLast = modelRows[modelRows.length - 1];
+        for (int mc : modelCols) {
+            if (!tableModel.isCellEditable(rFirst, mc) || !tableModel.isCellEditable(rLast, mc)) {
+                continue;
+            }
+            double physFirst = table.toPhysical(getRawValue(rFirst, mc));
+            double physLast = table.toPhysical(getRawValue(rLast, mc));
+            for (int mr = rFirst; mr <= rLast; mr++) {
+                if (!tableModel.isCellEditable(mr, mc)) {
+                    continue;
+                }
+                double t = (rFirst == rLast) ? 0.0 : (double) (mr - rFirst) / (rLast - rFirst);
+                setRawValue(mr, mc, table.toRaw(physFirst + t * (physLast - physFirst)));
+                stats.cells++;
+            }
+            stats.spans++;
+        }
+        return stats;
+    }
+
+    private OperationStats smoothRows() {
+        OperationStats stats = new OperationStats();
+        int[] modelCols = getSelectedModelColumns();
+        int[] modelRows = getSelectedEditableModelRows();
+        if (modelCols.length < 3 || modelRows.length == 0) {
+            statusLabel.setText("Select at least 3 editable cells in one row to smooth.");
+            return stats;
+        }
+
+        int cFirst = modelCols[0];
+        int cLast = modelCols[modelCols.length - 1];
+        for (int mr : modelRows) {
+            if (!tableModel.isCellEditable(mr, cFirst) || !tableModel.isCellEditable(mr, cLast)) {
+                continue;
+            }
+            double[] phys = new double[cLast - cFirst + 1];
+            for (int mc = cFirst; mc <= cLast; mc++) {
+                phys[mc - cFirst] = table.toPhysical(getRawValue(mr, mc));
+            }
+            for (int mc = cFirst + 1; mc < cLast; mc++) {
+                double smoothed = (phys[mc - cFirst - 1] + phys[mc - cFirst] + phys[mc - cFirst + 1]) / 3.0;
+                setRawValue(mr, mc, table.toRaw(smoothed));
+                stats.cells++;
+            }
+            if (cLast - cFirst >= 2) {
+                stats.spans++;
+            }
+        }
+        return stats;
+    }
+
+    private OperationStats smoothColumns() {
+        OperationStats stats = new OperationStats();
+        int[] modelCols = getSelectedModelColumns();
+        int[] modelRows = getSelectedEditableModelRows();
+        if (modelCols.length == 0 || modelRows.length < 3) {
+            statusLabel.setText("Select at least 3 editable cells in one column to smooth.");
+            return stats;
+        }
+
+        int rFirst = modelRows[0];
+        int rLast = modelRows[modelRows.length - 1];
+        for (int mc : modelCols) {
+            if (!tableModel.isCellEditable(rFirst, mc) || !tableModel.isCellEditable(rLast, mc)) {
+                continue;
+            }
+            double[] phys = new double[rLast - rFirst + 1];
+            for (int mr = rFirst; mr <= rLast; mr++) {
+                phys[mr - rFirst] = table.toPhysical(getRawValue(mr, mc));
+            }
+            for (int mr = rFirst + 1; mr < rLast; mr++) {
+                double smoothed = (phys[mr - rFirst - 1] + phys[mr - rFirst] + phys[mr - rFirst + 1]) / 3.0;
+                setRawValue(mr, mc, table.toRaw(smoothed));
+                stats.cells++;
+            }
+            if (rLast - rFirst >= 2) {
+                stats.spans++;
+            }
+        }
+        return stats;
+    }
+
+    private OperationAxis resolveOperationAxis(boolean quiet) {
+        if (!table.is2D()) {
+            return OperationAxis.ROWS;
+        }
+
+        OperationAxis requested = axisCombo != null ? (OperationAxis) axisCombo.getSelectedItem() : OperationAxis.AUTO;
+        if (requested == null || requested == OperationAxis.AUTO) {
+            int[] modelRows = getSelectedEditableModelRows();
+            int[] modelCols = getSelectedModelColumns();
+            if (modelRows.length > 1 && modelCols.length > 1) {
+                if (!quiet) {
+                    statusLabel.setText("Choose Rows or Columns for rectangular selections.");
+                }
+                return null;
+            }
+            if (modelCols.length > 1) {
+                return OperationAxis.ROWS;
+            }
+            if (modelRows.length > 1) {
+                return OperationAxis.COLUMNS;
+            }
+            if (!quiet) {
+                statusLabel.setText("Selection is too small for that operation.");
+            }
+            return null;
+        }
+        return requested;
+    }
+
+    private int[] getSelectedEditableModelRows() {
+        return Arrays.stream(grid.getSelectedRows())
+                .map(grid::convertRowIndexToModel)
+                .filter(row -> Arrays.stream(grid.getSelectedColumns())
+                        .map(grid::convertColumnIndexToModel)
+                        .anyMatch(col -> tableModel.isCellEditable(row, col)))
+                .sorted()
+                .distinct()
+                .toArray();
+    }
+
+    private int[] getSelectedModelColumns() {
+        return Arrays.stream(grid.getSelectedColumns())
+                .map(grid::convertColumnIndexToModel)
+                .sorted()
+                .distinct()
+                .toArray();
+    }
+
+    private int countEditableSelectedCells() {
+        int count = 0;
+        for (int row : grid.getSelectedRows()) {
+            int modelRow = grid.convertRowIndexToModel(row);
+            for (int col : grid.getSelectedColumns()) {
+                int modelCol = grid.convertColumnIndexToModel(col);
+                if (tableModel.isCellEditable(modelRow, modelCol)) {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     // =========================================================================
@@ -686,11 +1001,10 @@ public class GhidraTablesEditorFrame extends JFrame {
     // =========================================================================
 
     private JTable buildRowHeader(DensoTable2D t2d) {
-        DefaultTableModel rhModel = new DefaultTableModel(t2d.getCountY() + 1, 1) {
+        DefaultTableModel rhModel = new DefaultTableModel(t2d.getCountY(), 1) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
             @Override public Object getValueAt(int r, int c) {
-                if (r == 0) return "";
-                return formatFloat(t2d.getValuesY()[r - 1]);
+                return formatAxisValue(t2d.getValuesY()[r]);
             }
         };
         rowHeaderModel = rhModel;
@@ -699,8 +1013,8 @@ public class GhidraTablesEditorFrame extends JFrame {
         rh.setBackground(GhidraTheme.tableHeaderBackground());
         rh.setForeground(GhidraTheme.tableHeaderForeground());
         rh.setFont(UI_FONT_BOLD);
-        rh.setRowHeight(grid.getRowHeight());
-        rh.setPreferredScrollableViewportSize(new Dimension(70, 0));
+        rh.setRowHeight(currentRowHeight);
+        rh.setPreferredScrollableViewportSize(new Dimension(currentRowHeaderWidth, 0));
         rh.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             {
                 setHorizontalAlignment(SwingConstants.CENTER);
@@ -717,7 +1031,7 @@ public class GhidraTablesEditorFrame extends JFrame {
                 return this;
             }
         });
-        rh.getColumnModel().getColumn(0).setPreferredWidth(70);
+        rh.getColumnModel().getColumn(0).setPreferredWidth(currentRowHeaderWidth);
         rh.setTableHeader(null);
         return rh;
     }
@@ -735,8 +1049,8 @@ public class GhidraTablesEditorFrame extends JFrame {
         rh.setBackground(GhidraTheme.tableHeaderBackground());
         rh.setForeground(GhidraTheme.tableHeaderForeground());
         rh.setFont(UI_FONT_BOLD);
-        rh.setRowHeight(grid.getRowHeight());
-        rh.setPreferredScrollableViewportSize(new Dimension(72, 0));
+        rh.setRowHeight(currentRowHeight);
+        rh.setPreferredScrollableViewportSize(new Dimension(currentRowHeaderWidth, 0));
         rh.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             {
                 setHorizontalAlignment(SwingConstants.CENTER);
@@ -753,7 +1067,7 @@ public class GhidraTablesEditorFrame extends JFrame {
                 return this;
             }
         });
-        rh.getColumnModel().getColumn(0).setPreferredWidth(72);
+        rh.getColumnModel().getColumn(0).setPreferredWidth(currentRowHeaderWidth);
         rh.setTableHeader(null);
         return rh;
     }
@@ -770,17 +1084,174 @@ public class GhidraTablesEditorFrame extends JFrame {
 
     private void autoSizeColumns() {
         int cols = tableModel.getColumnCount();
+        FontMetrics metrics = grid.getFontMetrics(grid.getFont());
         for (int c = 0; c < cols; c++) {
-            grid.getColumnModel().getColumn(c).setPreferredWidth(72);
+            int width = Math.max(currentCellWidth,
+                    metrics.stringWidth(grid.getColumnName(c)) + 18);
+            grid.getColumnModel().getColumn(c).setPreferredWidth(width);
         }
         if (table.is2D()) {
             float[] xs = table.getValuesX();
             TableColumnModel cm = grid.getColumnModel();
             for (int c = 0; c < xs.length && c < cm.getColumnCount(); c++) {
-                cm.getColumn(c).setHeaderValue(formatFloat(xs[c]));
+                cm.getColumn(c).setHeaderValue(formatAxisValue(xs[c]));
             }
         }
         grid.getTableHeader().repaint();
+        if (rowHeaderTable != null) {
+            rowHeaderTable.setPreferredScrollableViewportSize(new Dimension(currentRowHeaderWidth, 0));
+            rowHeaderTable.getColumnModel().getColumn(0).setPreferredWidth(currentRowHeaderWidth);
+        }
+    }
+
+    private void applyTableDensity() {
+        if (grid == null || tableModel == null) {
+            return;
+        }
+
+        int cols = Math.max(1, tableModel.getColumnCount());
+        int dataRows = getDataRowCount();
+        TableDensity density = densityCombo != null
+                ? (TableDensity) densityCombo.getSelectedItem()
+                : TableDensity.AUTO;
+        if (density == null) {
+            density = TableDensity.AUTO;
+        }
+
+        int targetWidth;
+        int targetHeight;
+        switch (density) {
+            case COMPACT -> {
+                targetWidth = 52;
+                targetHeight = 22;
+            }
+            case COMFORTABLE -> {
+                targetWidth = 84;
+                targetHeight = 28;
+            }
+            case AUTO -> {
+                if (cols >= 28 || dataRows >= 20) {
+                    targetWidth = 46;
+                    targetHeight = 20;
+                }
+                else if (cols >= 18 || dataRows >= 12) {
+                    targetWidth = 58;
+                    targetHeight = 23;
+                }
+                else {
+                    targetWidth = 72;
+                    targetHeight = 26;
+                }
+            }
+            default -> throw new IllegalStateException("Unhandled density: " + density);
+        }
+
+        if (density == TableDensity.AUTO && tableScrollPane != null) {
+            int viewportWidth = tableScrollPane.getViewport().getWidth();
+            if (viewportWidth > 0) {
+                int fitWidth = (viewportWidth - 20) / cols;
+                targetWidth = Math.min(targetWidth, Math.max(42, fitWidth));
+            }
+        }
+
+        currentCellWidth = clamp(targetWidth, 42, 92);
+        currentRowHeight = clamp(targetHeight, 20, 30);
+        currentRowHeaderWidth = table.is2D() ? clamp(currentCellWidth + 12, 56, 88)
+                                             : clamp(currentCellWidth + 16, 60, 92);
+
+        Font tableFont = scaleFont(GhidraTheme.tableFont(),
+                currentCellWidth <= 48 ? -2f : currentCellWidth <= 58 ? -1f : 0f);
+        Font headerFont = scaleFont(GhidraTheme.tableHeaderFont(),
+                currentCellWidth <= 48 ? -2f : currentCellWidth <= 58 ? -1f : 0f);
+        Font cornerFont = scaleFont(GhidraTheme.smallFont(),
+                currentCellWidth <= 48 ? -1f : 0f).deriveFont(Font.BOLD | Font.ITALIC);
+
+        grid.setFont(tableFont);
+        grid.setRowHeight(currentRowHeight);
+        grid.getTableHeader().setFont(headerFont);
+
+        if (rowHeaderTable != null) {
+            rowHeaderTable.setFont(headerFont);
+            rowHeaderTable.setRowHeight(currentRowHeight);
+            TableCellRenderer rowRenderer = rowHeaderTable.getDefaultRenderer(Object.class);
+            if (rowRenderer instanceof JComponent component) {
+                component.setFont(headerFont);
+            }
+        }
+        if (cornerLabel != null) {
+            cornerLabel.setFont(cornerFont);
+        }
+
+        autoSizeColumns();
+        updateTableStats();
+        if (grid.isShowing()) {
+            grid.revalidate();
+            grid.repaint();
+        }
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private Font scaleFont(Font base, float delta) {
+        return base.deriveFont(Math.max(10f, base.getSize2D() + delta));
+    }
+
+    private int getDataRowCount() {
+        return table.is2D() ? ((DensoTable2D) table).getCountY() : 1;
+    }
+
+    private boolean isLargeTable() {
+        return tableModel.getColumnCount() >= 18 || getDataRowCount() >= 12;
+    }
+
+    private void updateTableStats() {
+        if (tableStatsLabel == null || tableModel == null) {
+            return;
+        }
+        TableDensity density = densityCombo != null
+                ? (TableDensity) densityCombo.getSelectedItem()
+                : TableDensity.AUTO;
+        String densityLabel = density == null ? "Auto" : density.toString();
+        tableStatsLabel.setText(String.format(
+                "%s  |  %d cols x %d rows  |  %s density",
+                table.getDataType().getDisplayName(),
+                tableModel.getColumnCount(),
+                getDataRowCount(),
+                densityLabel));
+    }
+
+    private void restoreInspectorLayout() {
+        if (splitPane == null || inspectorScrollPane == null || !inspectorScrollPane.isVisible()) {
+            return;
+        }
+
+        int target = lastDividerLocation > 0
+                ? lastDividerLocation
+                : Math.max(360, getWidth() - DEFAULT_INSPECTOR_WIDTH);
+        splitPane.setDividerLocation(target);
+    }
+
+    private void setInspectorVisible(boolean visible) {
+        if (inspectorScrollPane == null || splitPane == null) {
+            return;
+        }
+        if (!visible) {
+            lastDividerLocation = splitPane.getDividerLocation();
+        }
+        inspectorScrollPane.setVisible(visible);
+        splitPane.setDividerSize(visible ? Math.max(8, UIManager.getInt("SplitPane.dividerSize")) : 0);
+        if (inspectorToggle != null && inspectorToggle.isSelected() != visible) {
+            inspectorToggle.setSelected(visible);
+        }
+        splitPane.revalidate();
+        if (visible) {
+            SwingUtilities.invokeLater(this::restoreInspectorLayout);
+        }
+        else {
+            splitPane.repaint();
+        }
     }
 
     private void refreshHeatRange() {
@@ -788,7 +1259,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         if (table.is2D()) {
             min = max = 0;
             boolean first = true;
-            for (int r = 1; r < tableModel.getRowCount(); r++) {
+            for (int r = 0; r < tableModel.getRowCount(); r++) {
                 for (int c = 0; c < tableModel.getColumnCount(); c++) {
                     try {
                         double v = Double.parseDouble(tableModel.getValueAt(r, c).toString());
@@ -816,7 +1287,7 @@ public class GhidraTablesEditorFrame extends JFrame {
             rowHeaderModel.fireTableDataChanged();
         }
         loading = previousLoading;
-        autoSizeColumns();
+        applyTableDensity();
         updateStatus();
     }
 
@@ -871,12 +1342,14 @@ public class GhidraTablesEditorFrame extends JFrame {
         int[] cols = grid.getSelectedColumns();
 
         if (rows.length == 0 || cols.length == 0) {
-            selectionSummaryLabel.setText("<html><b>No cells selected</b><br>Pick a region to inspect and edit.</html>");
+            selectionSummaryLabel.setText("No cells selected.\nPick a region to inspect, edit, or shape.");
             return;
         }
 
         int count = 0;
         double sum = 0, minV = Double.MAX_VALUE, maxV = -Double.MAX_VALUE, lastVal = 0;
+        int editableRowCount = getSelectedEditableModelRows().length;
+        int editableColCount = getSelectedModelColumns().length;
 
         for (int r : rows) {
             for (int c : cols) {
@@ -892,15 +1365,30 @@ public class GhidraTablesEditorFrame extends JFrame {
             }
         }
 
+        String axisHint = "Curve tools run along the X axis.";
+        if (table.is2D()) {
+            OperationAxis resolvedAxis = resolveOperationAxis(true);
+            if (resolvedAxis == OperationAxis.ROWS) {
+                axisHint = "Tools will run across rows.";
+            }
+            else if (resolvedAxis == OperationAxis.COLUMNS) {
+                axisHint = "Tools will run across columns.";
+            }
+            else {
+                axisHint = "Choose Rows or Columns for rectangular selections.";
+            }
+        }
+
         if (count == 0) {
-            selectionSummaryLabel.setText("<html><b>Header cells</b><br>The current selection is read-only.</html>");
+            selectionSummaryLabel.setText("Header cells selected.\nThe current selection is read-only.");
         } else if (count == 1) {
             selectionSummaryLabel.setText(String.format(
-                    "<html><b>1 cell selected</b><br>Value: %.6g</html>", lastVal));
+                    "1 editable cell.\nValue %.6g\n%s",
+                    lastVal, axisHint));
         } else {
             selectionSummaryLabel.setText(String.format(
-                    "<html><b>%d cells selected</b><br>Min %.4g  Max %.4g  Avg %.4g</html>",
-                    count, minV, maxV, sum / count));
+                    "%d editable cells.\n%d rows x %d cols | Min %.4g  Max %.4g  Avg %.4g\n%s",
+                    count, editableRowCount, editableColCount, minV, maxV, sum / count, axisHint));
         }
     }
 
@@ -1192,22 +1680,20 @@ public class GhidraTablesEditorFrame extends JFrame {
         private final DensoTable2D t2d;
         Table2DModel(DensoTable2D t2d) { this.t2d = t2d; }
 
-        @Override public int getRowCount()    { return t2d.getCountY() + 1; }
+        @Override public int getRowCount()    { return t2d.getCountY(); }
         @Override public int getColumnCount() { return t2d.getCountX(); }
-        @Override public String getColumnName(int col) { return formatFloat(t2d.getValuesX()[col]); }
+        @Override public String getColumnName(int col) { return formatAxisValue(t2d.getValuesX()[col]); }
 
         @Override public Object getValueAt(int row, int col) {
-            if (row == 0) return formatFloat(t2d.getValuesX()[col]);
-            return formatValue(t2d.toPhysical(t2d.getZ(row - 1, col)));
+            return formatValue(t2d.toPhysical(t2d.getZ(row, col)));
         }
 
-        @Override public boolean isCellEditable(int row, int col) { return row > 0; }
+        @Override public boolean isCellEditable(int row, int col) { return true; }
 
         @Override public void setValueAt(Object aValue, int row, int col) {
-            if (row == 0) return;
             try {
                 double physical = Double.parseDouble(aValue.toString().trim());
-                t2d.setZ(row - 1, col, t2d.toRaw(physical));
+                t2d.setZ(row, col, t2d.toRaw(physical));
                 fireTableCellUpdated(row, col);
             } catch (NumberFormatException ignored) {}
         }
@@ -1222,7 +1708,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         @Override public String getColumnName(int col) { return String.valueOf(col); }
 
         @Override public Object getValueAt(int row, int col) {
-            if (row == 0) return formatFloat(t1d.getValuesX()[col]);
+            if (row == 0) return formatAxisValue(t1d.getValuesX()[col]);
             return formatValue(t1d.toPhysical(t1d.getValuesY()[col]));
         }
 
@@ -1242,14 +1728,38 @@ public class GhidraTablesEditorFrame extends JFrame {
     // Formatting / sizing
     // =========================================================================
 
-    private static String formatFloat(float f)  { return String.format("%.4g", f); }
-    private static String formatValue(double v) { return String.format("%.6g", v); }
+    private static String formatAxisValue(float v) {
+        if (!Float.isFinite(v)) return Float.toString(v);
+        float abs = Math.abs(v);
+        if (Math.abs(v - Math.round(v)) < 0.0001f) {
+            return String.format(Locale.ROOT, "%.0f", v);
+        }
+        if (abs >= 1000f) {
+            return String.format(Locale.ROOT, "%.0f", v);
+        }
+        if (abs >= 100f) {
+            return trimTrailingZeros(String.format(Locale.ROOT, "%.1f", v));
+        }
+        return trimTrailingZeros(String.format(Locale.ROOT, "%.2f", v));
+    }
+
+    private static String formatValue(double v) {
+        return trimTrailingZeros(String.format(Locale.ROOT, "%.6f", v));
+    }
+
+    private static String trimTrailingZeros(String s) {
+        if (!s.contains(".")) return s;
+        int end = s.length();
+        while (end > 0 && s.charAt(end - 1) == '0') end--;
+        if (end > 0 && s.charAt(end - 1) == '.') end--;
+        return s.substring(0, end);
+    }
 
     private Dimension computePreferredSize() {
         int cols = tableModel.getColumnCount();
-        int rows = tableModel.getRowCount();
-        int w    = Math.min(cols * 76 + 380, 1500);
-        int h    = Math.min(rows * 26 + 200,  900);
-        return new Dimension(Math.max(w, 820), Math.max(h, 420));
+        int rows = getDataRowCount() + 1;
+        int w    = Math.min(cols * 64 + 340, 1600);
+        int h    = Math.min(rows * 24 + 220, 950);
+        return new Dimension(Math.max(w, 920), Math.max(h, 500));
     }
 }
