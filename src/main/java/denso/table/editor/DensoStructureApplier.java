@@ -152,8 +152,15 @@ public final class DensoStructureApplier {
 
     // ── Header struct builders ────────────────────────────────────────────────
 
+    private static String headerStructName(DensoTable table) {
+        if (table.is2D()) {
+            return table.isHasMAC() ? "DensoTable2DHeaderMacBE" : "DensoTable2DHeaderNoMacBE";
+        }
+        return table.isHasMAC() ? "DensoTable1DHeaderMacBE" : "DensoTable1DHeaderNoMacBE";
+    }
+
     private static StructureDataType buildHeaderStruct(DensoTable table) {
-        String name = table.is2D() ? "DensoTable2DHeaderBE" : "DensoTable1DHeaderBE";
+        String name = headerStructName(table);
         StructureDataType s = new StructureDataType(CategoryPath.ROOT, name, 0);
 
         Pointer32DataType ptr32 = new Pointer32DataType();
@@ -483,7 +490,7 @@ public final class DensoStructureApplier {
             List<PreviewRow> rows = new ArrayList<>();
             for (DensoTable t : tables) {
                 if (cbHeader.isSelected()) {
-                    String headerName = t.is2D() ? "DensoTable2DHeaderBE" : "DensoTable1DHeaderBE";
+                    String headerName = headerStructName(t);
                     rows.add(new PreviewRow(
                             t.getName(),
                             "Header",
