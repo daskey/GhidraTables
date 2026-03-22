@@ -4,6 +4,8 @@
  */
 package denso.table.editor.model;
 
+import java.util.Arrays;
+
 /**
  * Abstract representation of a Denso ECU calibration lookup table.
  * <p>
@@ -18,6 +20,9 @@ package denso.table.editor.model;
  * {@code physical = raw * multiplier + offset}.
  */
 public abstract class DensoTable {
+
+    private static final float MIN_MAC_MULTIPLIER = 1e-5f;
+    private static final float MAX_MAC_MULTIPLIER = 1e6f;
 
     /** ROM address of the table header (in Ghidra address space). */
     protected long headerAddress;
@@ -34,10 +39,16 @@ public abstract class DensoTable {
     /** Whether a MAC (scale/offset) pair is present in the header. */
     protected boolean hasMAC;
 
-    /** Scale factor applied to raw values when MAC is present. */
+    /**
+     * Scale factor read from the table header when MAC is present.
+     * Defaults to the identity transform for tables that do not carry MAC data.
+     */
     protected float multiplier = 1.0f;
 
-    /** Additive offset applied to scaled values when MAC is present. */
+    /**
+     * Additive offset read from the table header when MAC is present.
+     * Defaults to the identity transform for tables that do not carry MAC data.
+     */
     protected float offset = 0.0f;
 
     /** X-axis float values read from the ROM. */
@@ -58,6 +69,9 @@ public abstract class DensoTable {
 
     /** Returns a human-readable dimension string, e.g. {@code "16x8"} or {@code "12x1"}. */
     public abstract String getDimensions();
+
+    /** Returns a detached copy suitable for editing without mutating the original scan result. */
+    public abstract DensoTable copy();
 
     // -------------------------------------------------------------------------
     // MAC helpers
@@ -87,6 +101,36 @@ public abstract class DensoTable {
         if (!hasMAC) return "";
         String op = offset >= 0 ? "+" : "-";
         return String.format("x * %.6g %s %.6g", multiplier, op, Math.abs(offset));
+    }
+
+    /**
+     * Validates MAC parameters against the same plausibility rules used by the scanner.
+     *
+     * @return {@code null} when valid; otherwise a user-facing error message
+     */
+    public static String validateMacParameters(float multiplier, float offset) {
+        if (!Float.isFinite(multiplier) ||
+                Math.abs(multiplier) < MIN_MAC_MULTIPLIER ||
+                Math.abs(multiplier) > MAX_MAC_MULTIPLIER) {
+            return "Multiplier must be finite and within [1e-5, 1e6].";
+        }
+        if (!Float.isFinite(offset)) {
+            return "Offset must be a finite value.";
+        }
+        return null;
+    }
+
+    protected final void copyCommonStateTo(DensoTable copy) {
+        copy.headerAddress = headerAddress;
+        copy.ptrX = ptrX;
+        copy.countX = countX;
+        copy.dataType = dataType;
+        copy.hasMAC = hasMAC;
+        copy.multiplier = multiplier;
+        copy.offset = offset;
+        copy.valuesX = Arrays.copyOf(valuesX, valuesX.length);
+        copy.name = name;
+        copy.category = category;
     }
 
     // -------------------------------------------------------------------------

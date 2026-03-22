@@ -52,6 +52,14 @@ public final class DensoStructureApplier {
     public static boolean showDialogAndApply(ghidra.program.model.listing.Program program,
             List<DensoTable> tables, Component parent) {
 
+        if (!program.getLanguage().isBigEndian()) {
+            Msg.showWarn(DensoStructureApplier.class, parent,
+                    "Unsupported Endianness",
+                    "Apply Structure currently supports only big-endian programs. " +
+                    "These Denso table headers and arrays are parsed as big-endian.");
+            return false;
+        }
+
         ApplyStructureDialog dlg = new ApplyStructureDialog(tables, parent);
         dlg.setVisible(true);
         if (!dlg.isConfirmed()) return false;
@@ -143,7 +151,7 @@ public final class DensoStructureApplier {
     // ── Header struct builders ────────────────────────────────────────────────
 
     private static StructureDataType buildHeaderStruct(DensoTable table) {
-        String name = table.is2D() ? "DensoTable2DHeader" : "DensoTable1DHeader";
+        String name = table.is2D() ? "DensoTable2DHeaderBE" : "DensoTable1DHeaderBE";
         StructureDataType s = new StructureDataType(CategoryPath.ROOT, name, 0);
 
         Pointer32DataType ptr32 = new Pointer32DataType();
@@ -263,6 +271,11 @@ public final class DensoStructureApplier {
             lbl.setForeground(FG);
             lbl.setFont(new Font(Font.MONOSPACED, Font.BOLD, 12));
             p.add(lbl);
+
+            JLabel note = new JLabel("Clears existing code units across the selected ranges.");
+            note.setForeground(DIM);
+            note.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 10));
+            p.add(note);
             return p;
         }
 
@@ -343,7 +356,7 @@ public final class DensoStructureApplier {
                 sb.append("── ").append(t.getName()).append(" ──\n");
 
                 if (cbHeader.isSelected()) {
-                    String hdrName = t.is2D() ? "DensoTable2DHeader" : "DensoTable1DHeader";
+                    String hdrName = t.is2D() ? "DensoTable2DHeaderBE" : "DensoTable1DHeaderBE";
                     int hdrSize = headerSize(t);
                     sb.append(String.format("  %-20s %s  (%d bytes)\n",
                             hdrName, t.getAddressHex(), hdrSize));

@@ -41,8 +41,8 @@ public class DensoTable2D extends DensoTable {
     private float[] valuesY = new float[0];
 
     /**
-     * Physical Z-data matrix, indexed as {@code valuesZ[y][x]}.
-     * Values are stored as physical units (MAC applied when present).
+     * Raw Z-data matrix, indexed as {@code valuesZ[y][x]}.
+     * The editor applies MAC conversion only when displaying or editing values.
      */
     private double[][] valuesZ = new double[0][0];
 
@@ -55,6 +55,21 @@ public class DensoTable2D extends DensoTable {
 
     @Override
     public String getDimensions() { return countX + "x" + countY; }
+
+    @Override
+    public DensoTable copy() {
+        DensoTable2D copy = new DensoTable2D();
+        copyCommonStateTo(copy);
+        copy.ptrY = ptrY;
+        copy.ptrZ = ptrZ;
+        copy.countY = countY;
+        copy.valuesY = java.util.Arrays.copyOf(valuesY, valuesY.length);
+        copy.valuesZ = new double[valuesZ.length][];
+        for (int i = 0; i < valuesZ.length; i++) {
+            copy.valuesZ[i] = java.util.Arrays.copyOf(valuesZ[i], valuesZ[i].length);
+        }
+        return copy;
+    }
 
     // -------------------------------------------------------------------------
     // Getters / setters

@@ -67,7 +67,9 @@ public class GhidraTablesEditorFrame extends JFrame {
 
     // ── UI components ─────────────────────────────────────────────────────────
     private JTable grid;
+    private JTable rowHeaderTable;
     private AbstractTableModel tableModel;
+    private AbstractTableModel rowHeaderModel;
     private HeatMapCellRenderer renderer;
     private MultiEditTableCellEditor editor;
 
@@ -111,9 +113,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         // Always read fresh from ROM so the display is never stale from scan data
         loadFromRom();
         syncMacUi();
-        loading = true;
-        tableModel.fireTableDataChanged();
-        loading = false;
+        refreshGridFromModel();
 
         pack();
         setMinimumSize(new Dimension(520, 320));
@@ -323,8 +323,8 @@ public class GhidraTablesEditorFrame extends JFrame {
         scroll.setBorder(BorderFactory.createEmptyBorder(4, 4, 0, 4));
 
         if (table.is2D()) {
-            JTable rowHeader = buildRowHeader((DensoTable2D) table);
-            scroll.setRowHeaderView(rowHeader);
+            rowHeaderTable = buildRowHeader((DensoTable2D) table);
+            scroll.setRowHeaderView(rowHeaderTable);
             scroll.setCorner(JScrollPane.UPPER_LEFT_CORNER, buildCornerLabel());
         }
 
@@ -591,6 +591,7 @@ public class GhidraTablesEditorFrame extends JFrame {
                 return formatFloat(t2d.getValuesY()[r - 1]);
             }
         };
+        rowHeaderModel = rhModel;
 
         JTable rh = new JTable(rhModel);
         rh.setBackground(new Color(38, 50, 66));
@@ -669,6 +670,18 @@ public class GhidraTablesEditorFrame extends JFrame {
         if (grid != null) grid.repaint();
     }
 
+    private void refreshGridFromModel() {
+        boolean previousLoading = loading;
+        loading = true;
+        tableModel.fireTableDataChanged();
+        if (rowHeaderModel != null) {
+            rowHeaderModel.fireTableDataChanged();
+        }
+        loading = previousLoading;
+        autoSizeColumns();
+        updateStatus();
+    }
+
     // =========================================================================
     // MAC panel
     // =========================================================================
@@ -735,6 +748,13 @@ public class GhidraTablesEditorFrame extends JFrame {
         try {
             float newMult = Float.parseFloat(multField.getText().trim());
             float newOff  = Float.parseFloat(offField.getText().trim());
+            String validationError = DensoTable.validateMacParameters(newMult, newOff);
+            if (validationError != null) {
+                statusLabel.setText(validationError);
+                multField.setForeground(new Color(220, 80, 80));
+                offField.setForeground(new Color(220, 80, 80));
+                return;
+            }
             table.setMultiplier(newMult);
             table.setOffset(newOff);
             macExprLabel.setText(table.getMacExpression());
@@ -744,6 +764,7 @@ public class GhidraTablesEditorFrame extends JFrame {
             refreshHeatRange();
             markDirty();
         } catch (NumberFormatException ex) {
+            statusLabel.setText("MAC fields must be numeric.");
             multField.setForeground(new Color(220, 80, 80));
             offField.setForeground(new Color(220, 80, 80));
         }
@@ -818,6 +839,18 @@ public class GhidraTablesEditorFrame extends JFrame {
             return;
         }
         if (!dirty) return;
+        if (grid.isEditing() && !grid.getCellEditor().stopCellEditing()) {
+            statusLabel.setText("Finish editing the current cell before saving.");
+            return;
+        }
+        if (table.isHasMAC()) {
+            String validationError = DensoTable.validateMacParameters(
+                    table.getMultiplier(), table.getOffset());
+            if (validationError != null) {
+                Msg.showWarn(this, this, "Invalid MAC", validationError);
+                return;
+            }
+        }
 
         int tx = program.startTransaction("Edit Denso Table: " + table.getName());
         boolean success = false;
@@ -847,7 +880,15 @@ public class GhidraTablesEditorFrame extends JFrame {
         byte[] raw = new byte[countX * countY * elemSize];
         for (int y = 0; y < countY; y++) {
             for (int x = 0; x < countX; x++) {
-                long bits = t2d.getDataType().doubleToRaw(t2d.getZ(y, x));
+                long bits;
+                try {
+                    bits = t2d.getDataType().doubleToRaw(t2d.getZ(y, x));
+                }
+                catch (IllegalArgumentException ex) {
+                    throw new IllegalArgumentException(
+                            "Invalid value at row " + (y + 1) + ", column " + (x + 1) +
+                            ": " + ex.getMessage(), ex);
+                }
                 writeBigEndian(raw, (y * countX + x) * elemSize, bits, elemSize);
             }
         }
@@ -860,13 +901,25 @@ public class GhidraTablesEditorFrame extends JFrame {
         int count    = t1d.getCountX();
         byte[] raw   = new byte[count * elemSize];
         for (int i = 0; i < count; i++) {
-            long bits = t1d.getDataType().doubleToRaw(t1d.getValuesY()[i]);
+            long bits;
+            try {
+                bits = t1d.getDataType().doubleToRaw(t1d.getValuesY()[i]);
+            }
+            catch (IllegalArgumentException ex) {
+                throw new IllegalArgumentException(
+                        "Invalid value at column " + (i + 1) + ": " + ex.getMessage(), ex);
+            }
             writeBigEndian(raw, i * elemSize, bits, elemSize);
         }
         mem.setBytes(space.getAddress(t1d.getPtrY()), raw);
     }
 
     private void writeMacHeader(DensoTable t, Memory mem) throws Exception {
+        String validationError = DensoTable.validateMacParameters(
+                t.getMultiplier(), t.getOffset());
+        if (validationError != null) {
+            throw new IllegalArgumentException(validationError);
+        }
         AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
         long macAddr = t.getHeaderAddress() + (t.is2D() ? 20 : 12);
         byte[] buf = new byte[8];
@@ -903,6 +956,22 @@ public class GhidraTablesEditorFrame extends JFrame {
                 DensoTable2D t2d = (DensoTable2D) table;
                 DensoTableType dtype = t2d.getDataType();
                 int es = dtype.getValueSize(), cx = t2d.getCountX(), cy = t2d.getCountY();
+                byte[] rawX = new byte[cx * 4];
+                mem.getBytes(space.getAddress(t2d.getPtrX()), rawX);
+                float[] valuesX = new float[cx];
+                for (int i = 0; i < cx; i++) {
+                    valuesX[i] = readFloatBE(rawX, i * 4);
+                }
+                t2d.setValuesX(valuesX);
+
+                byte[] rawY = new byte[cy * 4];
+                mem.getBytes(space.getAddress(t2d.getPtrY()), rawY);
+                float[] valuesY = new float[cy];
+                for (int i = 0; i < cy; i++) {
+                    valuesY[i] = readFloatBE(rawY, i * 4);
+                }
+                t2d.setValuesY(valuesY);
+
                 byte[] raw = new byte[cx * cy * es];
                 mem.getBytes(space.getAddress(t2d.getPtrZ()), raw);
                 double[][] values = new double[cy][cx];
@@ -916,6 +985,14 @@ public class GhidraTablesEditorFrame extends JFrame {
                 DensoTable1D t1d = (DensoTable1D) table;
                 DensoTableType dtype = t1d.getDataType();
                 int es = dtype.getValueSize(), count = t1d.getCountX();
+                byte[] rawX = new byte[count * 4];
+                mem.getBytes(space.getAddress(t1d.getPtrX()), rawX);
+                float[] valuesX = new float[count];
+                for (int i = 0; i < count; i++) {
+                    valuesX[i] = readFloatBE(rawX, i * 4);
+                }
+                t1d.setValuesX(valuesX);
+
                 byte[] raw = new byte[count * es];
                 mem.getBytes(space.getAddress(t1d.getPtrY()), raw);
                 double[] values = new double[count];
@@ -958,6 +1035,9 @@ public class GhidraTablesEditorFrame extends JFrame {
 
     private void revertChanges() {
         if (!dirty) return;
+        if (grid.isEditing()) {
+            grid.getCellEditor().cancelCellEditing();
+        }
         int choice = JOptionPane.showConfirmDialog(this,
                 "Discard all unsaved changes?", "Revert",
                 JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
@@ -969,9 +1049,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         saveBtn.setEnabled(false);
         revertBtn.setEnabled(false);
         setTitle(table.getName() + " - GhidraTables");
-        loading = true;
-        tableModel.fireTableDataChanged();
-        loading = false;
+        refreshGridFromModel();
         statusLabel.setText("Reverted from ROM.");
     }
 

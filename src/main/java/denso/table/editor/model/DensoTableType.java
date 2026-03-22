@@ -76,13 +76,48 @@ public enum DensoTableType {
      */
     public long doubleToRaw(double value) {
         return switch (this) {
-            case FLOAT   -> Float.floatToIntBits((float) value) & 0xFFFFFFFFL;
-            case UINT8   -> Math.max(0, Math.min(255,   (long) Math.round(value)));
-            case UINT16  -> Math.max(0, Math.min(65535, (long) Math.round(value)));
-            case INT8    -> (byte) (long) Math.round(value) & 0xFFL;
-            case INT16   -> (short) (long) Math.round(value) & 0xFFFFL;
-            case UINT32  -> Math.max(0, (long) Math.round(value)) & 0xFFFFFFFFL;
-            default      -> (long) Math.round(value);
+            case FLOAT   -> floatToRaw(value);
+            case UINT8   -> requireRoundedIntegralInRange(value, 0, 0xFFL, "UInt8");
+            case UINT16  -> requireRoundedIntegralInRange(value, 0, 0xFFFFL, "UInt16");
+            case INT8    -> requireSignedRaw(value, Byte.MIN_VALUE, Byte.MAX_VALUE, "Int8", 8);
+            case INT16   -> requireSignedRaw(value, Short.MIN_VALUE, Short.MAX_VALUE, "Int16", 16);
+            case UINT32  -> requireRoundedIntegralInRange(value, 0, 0xFFFFFFFFL, "UInt32");
+            default      -> requireFiniteLong(value, "value");
         };
+    }
+
+    private static long floatToRaw(double value) {
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException("Float value must be finite.");
+        }
+        float narrowed = (float) value;
+        if (!Float.isFinite(narrowed)) {
+            throw new IllegalArgumentException("Float value is out of range.");
+        }
+        return Float.floatToIntBits(narrowed) & 0xFFFFFFFFL;
+    }
+
+    private static long requireRoundedIntegralInRange(double value, long min, long max,
+            String typeName) {
+        long rounded = requireFiniteLong(value, typeName);
+        if (rounded < min || rounded > max) {
+            throw new IllegalArgumentException(typeName + " value " + value +
+                    " is out of range [" + min + ", " + max + "].");
+        }
+        return rounded;
+    }
+
+    private static long requireSignedRaw(double value, long min, long max,
+            String typeName, int bits) {
+        long rounded = requireRoundedIntegralInRange(value, min, max, typeName);
+        long mask = (1L << bits) - 1;
+        return rounded & mask;
+    }
+
+    private static long requireFiniteLong(double value, String typeName) {
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException(typeName + " must be finite.");
+        }
+        return Math.round(value);
     }
 }

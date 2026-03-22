@@ -188,7 +188,7 @@ public final class DensoTableScanner {
         if (dtype == DensoTableType.FLOAT) {
             for (double[] row : valuesZ) {
                 for (double v : row) {
-                    if (!Double.isFinite(v) || Math.abs(v) > MAX_AXIS_VALUE) return null;
+                    if (!isPlausibleCalibrationFloat(v)) return null;
                 }
             }
         }
@@ -257,7 +257,7 @@ public final class DensoTableScanner {
         // For float data, raw Y values must be finite and within calibration range
         if (dtype == DensoTableType.FLOAT) {
             for (double v : valuesY) {
-                if (!Double.isFinite(v) || Math.abs(v) > MAX_AXIS_VALUE) return null;
+                if (!isPlausibleCalibrationFloat(v)) return null;
             }
         }
 
@@ -386,7 +386,7 @@ public final class DensoTableScanner {
      * Values outside [1e-5, 1e6] are either subnormal noise or misread ROM bytes.
      */
     private static boolean isPlausibleMultiplier(float v) {
-        return Float.isFinite(v) && Math.abs(v) >= 1e-5f && Math.abs(v) <= 1e6f;
+        return DensoTable.validateMacParameters(v, 0.0f) == null;
     }
 
     /**
@@ -404,13 +404,17 @@ public final class DensoTableScanner {
      */
     private static boolean isMonotonicFinite(float[] arr) {
         for (int i = 0; i < arr.length; i++) {
-            if (!Float.isFinite(arr[i])) return false;
-            if (Math.abs(arr[i]) > MAX_AXIS_VALUE) return false;
-            // Subnormal non-zero values (|v| < Float.MIN_NORMAL) are misread bytes, not axis breakpoints
-            if (arr[i] != 0.0f && Math.abs(arr[i]) < Float.MIN_NORMAL) return false;
+            if (!isPlausibleCalibrationFloat(arr[i])) return false;
             if (i > 0 && arr[i] <= arr[i - 1]) return false;
         }
         return true;
+    }
+
+    private static boolean isPlausibleCalibrationFloat(double v) {
+        if (!Double.isFinite(v)) return false;
+        if (Math.abs(v) > MAX_AXIS_VALUE) return false;
+        // Subnormal non-zero values are almost always misread bytes, not real table data.
+        return v == 0.0 || Math.abs(v) >= Float.MIN_NORMAL;
     }
 
     private static boolean isValidCount(int count) {

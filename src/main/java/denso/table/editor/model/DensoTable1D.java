@@ -26,8 +26,8 @@ public class DensoTable1D extends DensoTable {
     private long ptrY;
 
     /**
-     * Physical Y-axis data values.  Length equals {@code countX}.
-     * Values are stored as physical units (MAC applied if present).
+     * Raw Y-axis data values. Length equals {@code countX}.
+     * The editor applies MAC conversion only when displaying or editing values.
      */
     private double[] valuesY = new double[0];
 
@@ -40,6 +40,15 @@ public class DensoTable1D extends DensoTable {
 
     @Override
     public String getDimensions() { return countX + "x1"; }
+
+    @Override
+    public DensoTable copy() {
+        DensoTable1D copy = new DensoTable1D();
+        copyCommonStateTo(copy);
+        copy.ptrY = ptrY;
+        copy.valuesY = java.util.Arrays.copyOf(valuesY, valuesY.length);
+        return copy;
+    }
 
     // -------------------------------------------------------------------------
     // Getters / setters

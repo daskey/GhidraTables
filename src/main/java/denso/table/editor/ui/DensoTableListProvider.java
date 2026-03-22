@@ -7,6 +7,7 @@ package denso.table.editor.ui;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.swing.*;
 
 import denso.table.editor.DensoStructureApplier;
@@ -48,6 +49,7 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     private JLabel statusLabel;
     private DockingAction scanAction;
     private DockingAction applyStructureAction;
+    private final AtomicLong scanGeneration = new AtomicLong();
 
     // ── Construction ──────────────────────────────────────────────────────────
 
@@ -81,23 +83,27 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
             return;
         }
 
+        long scanId = scanGeneration.incrementAndGet();
+        Program scannedProgram = program;
         statusLabel.setText("Scanning...");
         scanAction.setEnabled(false);
 
         Task task = new Task("Scanning for Denso tables", true, true, false) {
             @Override
-            public void run(TaskMonitor monitor) throws CancelledException {
-                List<DensoTable> tables = DensoTableScanner.scan(program, monitor);
-                SwingUtilities.invokeLater(() -> {
-                    model.setTables(tables);
-                    statusLabel.setText(String.format(
-                            "Found %d table%s  (1D: %d  2D: %d)",
-                            tables.size(),
-                            tables.size() == 1 ? "" : "s",
-                            tables.stream().filter(t -> !t.is2D()).count(),
-                            tables.stream().filter(DensoTable::is2D).count()));
-                    scanAction.setEnabled(true);
-                });
+            public void run(TaskMonitor monitor) {
+                try {
+                    List<DensoTable> tables = DensoTableScanner.scan(scannedProgram, monitor);
+                    SwingUtilities.invokeLater(() ->
+                            completeScan(scanId, scannedProgram, tables, null, false));
+                }
+                catch (CancelledException ex) {
+                    SwingUtilities.invokeLater(() ->
+                            completeScan(scanId, scannedProgram, null, null, true));
+                }
+                catch (RuntimeException ex) {
+                    SwingUtilities.invokeLater(() ->
+                            completeScan(scanId, scannedProgram, null, ex, false));
+                }
             }
         };
 
@@ -105,10 +111,14 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     }
 
     public void programChanged(Program program) {
+        scanGeneration.incrementAndGet();
         model.setTables(List.of());
         statusLabel.setText(program == null
                 ? "No program loaded - click Scan to begin."
                 : "Program loaded - click Scan to find tables.");
+        if (scanAction != null) {
+            scanAction.setEnabled(true);
+        }
     }
 
     // ── UI construction ───────────────────────────────────────────────────────
@@ -241,8 +251,9 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         Window owner = SwingUtilities.getWindowAncestor(filterTable);
 
         for (DensoTable t : sel) {
+            DensoTable detachedTable = t.copy();
             GhidraTablesEditorFrame frame = new GhidraTablesEditorFrame(
-                    t, prog, plugin.getTool(), owner);
+                    detachedTable, prog, plugin.getTool(), owner);
             frame.setVisible(true);
         }
     }
@@ -280,5 +291,38 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
 
         Window owner = SwingUtilities.getWindowAncestor(filterTable);
         DensoStructureApplier.showDialogAndApply(prog, sel, owner);
+    }
+
+    private void completeScan(long scanId, Program scannedProgram, List<DensoTable> tables,
+            RuntimeException error, boolean cancelled) {
+        if (!isCurrentScan(scanId, scannedProgram)) {
+            return;
+        }
+
+        scanAction.setEnabled(true);
+
+        if (cancelled) {
+            statusLabel.setText("Scan cancelled.");
+            return;
+        }
+
+        if (error != null) {
+            statusLabel.setText("Scan failed.");
+            Msg.showError(this, null, "Scan Error",
+                    "Failed to scan the current program.", error);
+            return;
+        }
+
+        model.setTables(tables);
+        statusLabel.setText(String.format(
+                "Found %d table%s  (1D: %d  2D: %d)",
+                tables.size(),
+                tables.size() == 1 ? "" : "s",
+                tables.stream().filter(t -> !t.is2D()).count(),
+                tables.stream().filter(DensoTable::is2D).count()));
+    }
+
+    private boolean isCurrentScan(long scanId, Program scannedProgram) {
+        return scanGeneration.get() == scanId && plugin.getCurrentProgram() == scannedProgram;
     }
 }
