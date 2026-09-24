@@ -183,6 +183,25 @@ public final class DensoTableScanner {
                 && block.getStart().getAddressSpace().equals(space);
     }
 
+    /**
+     * Describes initialized blocks that {@link #scan} skips because they are not
+     * in the default address space (overlays, other spaces), e.g.
+     * {@code "cal (overlay space cal, 256 KB)"}. Empty when nothing is skipped.
+     */
+    public static List<String> describeSkippedBlocks(Program program) {
+        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+        List<String> skipped = new ArrayList<>();
+        for (MemoryBlock block : program.getMemory().getBlocks()) {
+            if (block.isInitialized() && !block.isExternalBlock() && !isScannable(block, space)) {
+                AddressSpace blockSpace = block.getStart().getAddressSpace();
+                skipped.add(String.format("%s (%s space %s, %d KB)", block.getName(),
+                        blockSpace.isOverlaySpace() ? "overlay" : "non-default",
+                        blockSpace.getName(), Math.max(1, block.getSize() / 1024)));
+            }
+        }
+        return skipped;
+    }
+
     // =========================================================================
     // Private parsing helpers
     // =========================================================================

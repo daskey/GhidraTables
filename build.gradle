@@ -40,6 +40,13 @@ dependencies {
 	testImplementation 'junit:junit:4.13.2'
 }
 
+test {
+	useJUnit()
+	testLogging {
+		exceptionFormat = 'full'
+	}
+}
+
 buildExtension.configure {
 	exclude '.claude/**'
 }
