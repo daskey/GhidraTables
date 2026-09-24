@@ -1722,20 +1722,13 @@ public class GhidraTablesEditorFrame extends JFrame {
         int[] rows = grid.getSelectedRows();
         int[] cols = grid.getSelectedColumns();
         if (rows.length == 0 || cols.length == 0) return;
-        String[] lines = text.strip().split("\\R");
-        String[][] cells = new String[lines.length][];
-        for (int i = 0; i < lines.length; i++) {
-            cells[i] = lines[i].split("\\t", -1);
-            if (cells[i].length != cells[0].length) {
-                throw new IllegalArgumentException("Clipboard rows must have equal widths.");
-            }
-        }
-        boolean single = lines.length == 1 && cells[0].length == 1;
+        double[][] cells = TableClipboard.parse(text);
+        boolean single = cells.length == 1 && cells[0].length == 1;
         boolean anchored = rows.length == 1 && cols.length == 1;
-        if (!single && !anchored && (rows.length != lines.length || cols.length != cells[0].length)) {
+        if (!single && !anchored && (rows.length != cells.length || cols.length != cells[0].length)) {
             throw new IllegalArgumentException("Select one anchor cell or a region matching the clipboard.");
         }
-        int height = single ? rows.length : lines.length;
+        int height = single ? rows.length : cells.length;
         int width = single ? cols.length : cells[0].length;
         if (anchored && (rows[0] + height > grid.getRowCount()
                 || cols[0] + width > grid.getColumnCount())) {
@@ -1749,7 +1742,7 @@ public class GhidraTablesEditorFrame extends JFrame {
                     if (!tableModel.isCellEditable(mr, mc)) {
                         throw new IllegalArgumentException("Paste includes read-only axis cells.");
                     }
-                    double physical = Double.parseDouble(cells[single ? 0 : r][single ? 0 : c].trim());
+                    double physical = cells[single ? 0 : r][single ? 0 : c];
                     setRawValue(mr, mc, table.toRaw(physical));
                 }
             }
