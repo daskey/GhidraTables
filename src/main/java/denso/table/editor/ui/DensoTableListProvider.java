@@ -6,7 +6,10 @@ package denso.table.editor.ui;
 
 import java.awt.*;
 import java.awt.event.*;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.swing.*;
 
@@ -54,6 +57,11 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     private final AtomicLong scanGeneration = new AtomicLong();
     private List<DensoTable> currentTables = List.of();
 
+    /** Identifies one table in one program, so each gets at most one editor window. */
+    private record EditorKey(Program program, long headerAddress) {}
+
+    private final Map<EditorKey, GhidraTablesEditorFrame> openEditors = new LinkedHashMap<>();
+
     // ── Construction ──────────────────────────────────────────────────────────
 
     public DensoTableListProvider(GhidraTablesPlugin plugin) {
@@ -73,8 +81,40 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     public JComponent getComponent() { return root; }
 
     public void dispose() {
+        closeEditors(null);
         filterTable.dispose();
         removeFromTool();
+    }
+
+    /**
+     * Closes editor windows without prompting. Editors hold a reference to their
+     * program and would fail on save once it is closed.
+     *
+     * @param program close only editors for this program, or all editors if null
+     */
+    public void closeEditors(Program program) {
+        for (GhidraTablesEditorFrame frame : editorsFor(program)) {
+            frame.closeWithoutPrompt();
+        }
+    }
+
+    /** Returns the number of open editors for {@code program} (or all, if null) with unsaved edits. */
+    public int countUnsavedEditors(Program program) {
+        int count = 0;
+        for (GhidraTablesEditorFrame frame : editorsFor(program)) {
+            if (frame.hasUnsavedChanges()) count++;
+        }
+        return count;
+    }
+
+    private List<GhidraTablesEditorFrame> editorsFor(Program program) {
+        List<GhidraTablesEditorFrame> frames = new ArrayList<>();
+        for (Map.Entry<EditorKey, GhidraTablesEditorFrame> entry : openEditors.entrySet()) {
+            if (program == null || entry.getKey().program() == program) {
+                frames.add(entry.getValue());
+            }
+        }
+        return frames;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -194,8 +234,12 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         jt.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2) {
-                    int viewCol  = jt.columnAtPoint(e.getPoint());
+                if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
+                    int viewRow = jt.rowAtPoint(e.getPoint());
+                    int viewCol = jt.columnAtPoint(e.getPoint());
+                    // Ignore double-clicks on empty space below/right of the rows,
+                    // which would otherwise act on a stale selection.
+                    if (viewRow < 0 || viewCol < 0) return;
                     String colName = jt.getColumnModel().getColumn(viewCol)
                                        .getHeaderValue().toString();
                     if (DensoTableListModel.HEADER_ADDRESS_COLUMN.equals(colName)) {
@@ -295,13 +339,47 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         if (sel.isEmpty()) return;
 
         Program prog = plugin.getCurrentProgram();
+        if (prog == null) return;
         Window owner = SwingUtilities.getWindowAncestor(filterTable);
 
         for (DensoTable t : sel) {
+            // Re-use an open editor for the same table: two windows editing the
+            // same bytes would silently overwrite each other on save.
+            EditorKey key = new EditorKey(prog, t.getHeaderAddress());
+            GhidraTablesEditorFrame existing = openEditors.get(key);
+            if (existing != null && existing.isDisplayable()) {
+                if ((existing.getExtendedState() & Frame.ICONIFIED) != 0) {
+                    existing.setExtendedState(existing.getExtendedState() & ~Frame.ICONIFIED);
+                }
+                existing.toFront();
+                existing.requestFocus();
+                continue;
+            }
+
             DensoTable detachedTable = t.copy();
             GhidraTablesEditorFrame frame = new GhidraTablesEditorFrame(
                     detachedTable, prog, plugin.getTool(), owner);
+            frame.setSaveListener(saved -> tableSaved(prog, saved));
+            frame.addWindowListener(new WindowAdapter() {
+                @Override
+                public void windowClosed(WindowEvent e) {
+                    openEditors.remove(key, frame);
+                }
+            });
+            openEditors.put(key, frame);
             frame.setVisible(true);
+        }
+    }
+
+    /** Mirrors saved MAC values into the scan results so the list's MAC column stays current. */
+    private void tableSaved(Program program, DensoTable saved) {
+        if (program != plugin.getCurrentProgram()) return;
+        for (DensoTable t : currentTables) {
+            if (t.getHeaderAddress() == saved.getHeaderAddress() && t.is2D() == saved.is2D()) {
+                t.setMultiplier(saved.getMultiplier());
+                t.setOffset(saved.getOffset());
+                model.updateObject(t);
+            }
         }
     }
 
