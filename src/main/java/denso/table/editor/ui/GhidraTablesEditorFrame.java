@@ -269,7 +269,11 @@ public class GhidraTablesEditorFrame extends JFrame {
         leftGroup.add(Box.createHorizontalStrut(6));
         leftGroup.add(makeChip(table.is2D() ? "2D" : "1D", GhidraTheme.secondaryForeground()));
         leftGroup.add(makeChip(table.getDimensions(), GhidraTheme.tableSelectionBackground()));
-        leftGroup.add(makeChip(table.getDataType().getDisplayName(), GhidraTheme.linkForeground()));
+        JLabel typeChip = makeChip(table.getDataTypeLabel(), GhidraTheme.linkForeground());
+        if (table.isTypeInferred()) {
+            typeChip.setToolTipText("Data type inferred by the scanner, not declared in the header. Verify it.");
+        }
+        leftGroup.add(typeChip);
         if (table.isHasMAC()) leftGroup.add(makeChip("MAC", GhidraTheme.linkForeground()));
 
         bar.add(leftGroup, BorderLayout.WEST);
@@ -521,7 +525,9 @@ public class GhidraTablesEditorFrame extends JFrame {
         overviewContent.setOpaque(false);
         overviewContent.setLayout(new BoxLayout(overviewContent, BoxLayout.Y_AXIS));
         overviewContent.add(buildMetaRow("Dimensions", table.getDimensions()));
-        overviewContent.add(buildMetaRow("Data Type", table.getDataType().getDisplayName()));
+        overviewContent.add(buildMetaRow("Data Type", table.isTypeInferred()
+                ? table.getDataTypeLabel() + " (inferred, verify)"
+                : table.getDataTypeLabel()));
         overviewContent.add(buildMetaRow("X Points", Integer.toString(table.getCountX())));
         if (table.is2D()) {
             overviewContent.add(buildMetaRow("Y Points",
@@ -539,7 +545,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         String dim = table.is2D() ? "2D" : "1D";
         String mac = table.isHasMAC() ? " \u00B7 MAC" : "";
         return dim + " \u00B7 " + table.getDimensions() + " \u00B7 "
-                + table.getDataType().getDisplayName() + mac;
+                + table.getDataTypeLabel() + mac;
     }
 
     private JComponent buildCollapsibleCard(String title, String summary, JPanel content) {
