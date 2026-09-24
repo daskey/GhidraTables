@@ -1,0 +1,43 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ghidra-11-4-2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Install Ghidra 11.4.2
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.2_build/ghidra_11.4.2_PUBLIC_20250826.zip \
+            --output "$RUNNER_TEMP/ghidra.zip"
+          unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP"
+          printf 'GHIDRA_INSTALL_DIR=%s\n' "$RUNNER_TEMP/ghidra_11.4.2_PUBLIC" >> "$GITHUB_ENV"
+      - name: Run tests with a display and build extension
+        run: xvfb-run -a ./gradlew -Djava.awt.headless=false test buildExtension --no-daemon
+      - name: Upload extension
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: GhidraTables-ghidra-11.4.2
+          path: dist/*.zip
+          if-no-files-found: error
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-reports
+          path: build/reports/tests/test/

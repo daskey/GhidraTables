@@ -23,16 +23,18 @@ Use it as an accelerator for analysis, not as a substitute for understanding the
 
 ## Build
 
-Set `GHIDRA_INSTALL_DIR` to a compatible Ghidra installation, then run the Gradle wrapper from the project root.
+Use JDK 21 and set `GHIDRA_INSTALL_DIR` to a compatible Ghidra installation (the build targets Ghidra 11.4.2), then run the Gradle wrapper from the project root. The wrapper downloads Gradle 8.14.5.
 
 ```powershell
 $env:GHIDRA_INSTALL_DIR="C:\path\to\ghidra"
 .\gradlew buildExtension
 ```
 
-The packaged extension zip is written to `dist/`.
+The packaged extension zip is written to `dist/`. Install that zip through Ghidra's `File > Install Extensions`. Don't install the repository or GitHub's "Source code" archive: it contains no compiled plugin, and its `extension.properties` still has the unfilled `@extname@` / `@extversion@` placeholders that `buildExtension` replaces.
 
 Unit tests for the table model run with `.\gradlew test` (same `GHIDRA_INSTALL_DIR` requirement).
+
+The `Build and test` GitHub Actions workflow runs the tests and `buildExtension` on pushes to `main` and `dev`, on pull requests, and on demand. The built extension zip is attached to each run as the `GhidraTables-ghidra-11.4.2` artifact.
 
 ## Basic Workflow
 
@@ -59,6 +61,8 @@ If you want Ghidra to lay out a whole calibration block properly:
 4. Right-click and choose `Apply Structure`.
 
 That will apply the detected table header plus the relevant axis/data structures so the listing becomes much easier to read and navigate.
+
+Axis arrays are often shared: several tables can point at the same axis, or at a shorter run of points inside a longer axis. Overlapping arrays of the same element type are merged into one array that covers all of them, and each table keeps its own `_XAxis` / `_YAxis` / `_ZData` label at its start address. Existing arrays of the same type are extended, never shortened, so re-applying a subset of tables is safe. A range that overlaps a header or an array of a different type in the same batch is left alone and reported.
 
 ## Table Editor
 
@@ -124,6 +128,8 @@ What the scanner checks, at every 4-byte aligned offset of each initialized memo
 - Axis arrays are finite, plausible, non-decreasing floats. Float payloads must also be plausible floats.
 - A MAC pair is assumed when the 8 bytes after the header decode to a multiplier in `[1e-7, 1e6]` and a finite offset.
 - Headers that declare float data (`0x00`) without a MAC are checked against neighboring descriptors. If the gap to the next data pointer matches a packed 8-bit or 16-bit payload, the table is read as `UInt8` or `UInt16` instead. This is an inference, so confirm the data type in the listing.
+
+Blocks outside the default address space (overlays, other spaces) are not scanned, because table addresses are read, written, and marked up in the default space. When blocks are skipped, the status bar says how many, and hovering over it lists them. The same list is written to the Ghidra log.
 
 ## Short Version
 

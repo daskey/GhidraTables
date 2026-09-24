@@ -441,12 +441,27 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         currentTables = List.copyOf(tables);
         updateOverview(scannedProgram, currentTables);
         model.setTables(tables);
-        statusLabel.setText(String.format(
+        String found = String.format(
                 "Found %d table%s  (1D: %d  2D: %d)",
                 tables.size(),
                 tables.size() == 1 ? "" : "s",
                 tables.stream().filter(t -> !t.is2D()).count(),
-                tables.stream().filter(DensoTable::is2D).count()));
+                tables.stream().filter(DensoTable::is2D).count());
+
+        // Say so when blocks were skipped, so missing tables aren't a mystery.
+        List<String> skipped = DensoTableScanner.describeSkippedBlocks(scannedProgram);
+        if (skipped.isEmpty()) {
+            statusLabel.setText(found);
+            statusLabel.setToolTipText(null);
+        }
+        else {
+            String detail = "Not scanned (outside the default address space): "
+                    + String.join(", ", skipped);
+            statusLabel.setText(found + "  |  " + skipped.size() + " block"
+                    + (skipped.size() == 1 ? "" : "s") + " not scanned");
+            statusLabel.setToolTipText(detail);
+            Msg.info(this, detail);
+        }
     }
 
     private boolean isCurrentScan(long scanId, Program scannedProgram) {

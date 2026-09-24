@@ -7,7 +7,10 @@ package denso.table.editor;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
 
@@ -17,7 +20,6 @@ import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.*;
 import ghidra.util.Msg;
-import ghidra.util.exception.CancelledException;
 
 /**
  * Utility for applying Ghidra data type structures to the addresses of
@@ -71,9 +73,7 @@ public final class DensoStructureApplier {
         int tx = program.startTransaction("Apply Denso Table Structures");
         boolean success = false;
         try {
-            for (DensoTable t : tables) {
-                applyToTable(program, t, opts, failures);
-            }
+            applyAll(program, tables, opts, failures);
             success = true;
         } catch (Exception ex) {
             Msg.showError(DensoStructureApplier.class, parent,
@@ -109,72 +109,200 @@ public final class DensoStructureApplier {
     // Application logic
     // =========================================================================
 
-    private static void applyToTable(ghidra.program.model.listing.Program program,
-            DensoTable table, Options opts, List<String> failures) {
-
-        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
-        Listing listing = program.getListing();
-
-        if (opts.applyHeader) {
-            try {
-                StructureDataType hdr = buildHeaderStruct(table);
-                Address addr = space.getAddress(table.getHeaderAddress());
-                listing.clearCodeUnits(addr, addr.add(hdr.getLength() - 1), false);
-                listing.createData(addr, hdr);
-                program.getSymbolTable().createLabel(addr, table.getName(), SourceType.ANALYSIS);
-            } catch (Exception ex) {
-                String failure = table.getName() + " header at " + table.getAddressHex()
-                        + ": " + ex.getMessage();
-                Msg.warn(DensoStructureApplier.class, "Header struct failed for " + failure);
-                failures.add(failure);
-            }
-        }
-
-        if (opts.applyXAxis) {
-            applyArray(program, listing, space, table.getPtrX(),
-                    FloatDataType.dataType, table.getCountX(), table.getName() + "_XAxis",
-                    failures);
-        }
-
-        if (table.is2D()) {
-            DensoTable2D t2d = (DensoTable2D) table;
-            if (opts.applyYAxis) {
-                applyArray(program, listing, space, t2d.getPtrY(),
-                        FloatDataType.dataType, t2d.getCountY(), table.getName() + "_YAxis",
-                        failures);
-            }
-            if (opts.applyData) {
-                applyArray(program, listing, space, t2d.getPtrZ(),
-                        ghidraTypeFor(t2d.getDataType()),
-                        t2d.getCountX() * t2d.getCountY(),
-                        table.getName() + "_ZData", failures);
-            }
-        } else {
-            DensoTable1D t1d = (DensoTable1D) table;
-            if (opts.applyData) {
-                applyArray(program, listing, space, t1d.getPtrY(),
-                        ghidraTypeFor(t1d.getDataType()),
-                        t1d.getCountX(),
-                        table.getName() + "_YData", failures);
-            }
+    /** One array a table asks for. Overlapping requests of the same type are merged. */
+    private record ArrayRequest(long start, DataType elemType, int count, String label) {
+        long end() {
+            return start + (long) count * elemType.getLength() - 1;
         }
     }
 
-    private static void applyArray(ghidra.program.model.listing.Program program,
-            Listing listing, AddressSpace space,
-            long ptr, DataType elemType, int count, String label, List<String> failures) {
+    /**
+     * Applies header structures, then axis and data arrays, for every table.
+     *
+     * <p>Axis arrays are often shared between tables, and one table's axis can
+     * start inside another's (for example an 8-point axis that reuses the first
+     * points of a 16-point one). Applying arrays one table at a time let each
+     * clear the previous one, so shared axes were truncated or left undefined.
+     * Instead, overlapping requests of the same element type are merged into a
+     * single array covering all of them, existing arrays of that type are
+     * extended rather than cut down, and each table still gets a label at its
+     * own start address.
+     */
+    static void applyAll(Program program, List<DensoTable> tables, Options opts,
+            List<String> failures) {
+        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+        AddressSet created = new AddressSet();
+        List<ArrayRequest> requests = new ArrayList<>();
+
+        for (DensoTable table : tables) {
+            if (opts.applyHeader) {
+                applyHeader(program, space, table, created, failures);
+            }
+            collectArrayRequests(table, opts, requests);
+        }
+
+        for (List<ArrayRequest> group : groupOverlappingRequests(requests)) {
+            applyArrayGroup(program, space, group, created, failures);
+        }
+    }
+
+    private static void applyHeader(Program program, AddressSpace space, DensoTable table,
+            AddressSet created, List<String> failures) {
         try {
-            ArrayDataType arr = new ArrayDataType(elemType, count, elemType.getLength());
-            Address addr = space.getAddress(ptr);
-            listing.clearCodeUnits(addr, addr.add(arr.getLength() - 1), false);
-            listing.createData(addr, arr);
-            program.getSymbolTable().createLabel(addr, label, SourceType.ANALYSIS);
+            StructureDataType hdr = buildHeaderStruct(table);
+            Address addr = space.getAddress(table.getHeaderAddress());
+            Address end = addr.add(hdr.getLength() - 1);
+            Listing listing = program.getListing();
+            listing.clearCodeUnits(addr, end, false);
+            listing.createData(addr, hdr);
+            created.add(addr, end);
+            program.getSymbolTable().createLabel(addr, table.getName(), SourceType.ANALYSIS);
         } catch (Exception ex) {
-            String failure = label + " at 0x" + Long.toHexString(ptr).toUpperCase()
+            String failure = table.getName() + " header at " + table.getAddressHex()
                     + ": " + ex.getMessage();
+            Msg.warn(DensoStructureApplier.class, "Header struct failed for " + failure);
+            failures.add(failure);
+        }
+    }
+
+    private static void collectArrayRequests(DensoTable table, Options opts,
+            List<ArrayRequest> requests) {
+        if (opts.applyXAxis) {
+            requests.add(new ArrayRequest(table.getPtrX(), FloatDataType.dataType,
+                    table.getCountX(), table.getName() + "_XAxis"));
+        }
+        if (table.is2D()) {
+            DensoTable2D t2d = (DensoTable2D) table;
+            if (opts.applyYAxis) {
+                requests.add(new ArrayRequest(t2d.getPtrY(), FloatDataType.dataType,
+                        t2d.getCountY(), table.getName() + "_YAxis"));
+            }
+            if (opts.applyData) {
+                requests.add(new ArrayRequest(t2d.getPtrZ(), ghidraTypeFor(t2d.getDataType()),
+                        t2d.getCountX() * t2d.getCountY(), table.getName() + "_ZData"));
+            }
+        }
+        else if (opts.applyData) {
+            DensoTable1D t1d = (DensoTable1D) table;
+            requests.add(new ArrayRequest(t1d.getPtrY(), ghidraTypeFor(t1d.getDataType()),
+                    t1d.getCountX(), table.getName() + "_YData"));
+        }
+    }
+
+    /**
+     * Groups requests that share an element type and overlap on element
+     * boundaries. Groups are returned in address order.
+     */
+    private static List<List<ArrayRequest>> groupOverlappingRequests(List<ArrayRequest> requests) {
+        Map<String, List<ArrayRequest>> byType = new LinkedHashMap<>();
+        for (ArrayRequest r : requests) {
+            byType.computeIfAbsent(r.elemType().getName(), k -> new ArrayList<>()).add(r);
+        }
+
+        List<List<ArrayRequest>> groups = new ArrayList<>();
+        for (List<ArrayRequest> sameType : byType.values()) {
+            sameType.sort(Comparator.comparingLong(ArrayRequest::start));
+            List<ArrayRequest> group = null;
+            long groupEnd = Long.MIN_VALUE;
+            for (ArrayRequest r : sameType) {
+                int elemLen = r.elemType().getLength();
+                boolean joins = group != null && r.start() <= groupEnd
+                        && (r.start() - group.get(0).start()) % elemLen == 0;
+                if (joins) {
+                    group.add(r);
+                    groupEnd = Math.max(groupEnd, r.end());
+                }
+                else {
+                    group = new ArrayList<>();
+                    group.add(r);
+                    groups.add(group);
+                    groupEnd = r.end();
+                }
+            }
+        }
+        groups.sort(Comparator.comparingLong(g -> g.get(0).start()));
+        return groups;
+    }
+
+    private static void applyArrayGroup(Program program, AddressSpace space,
+            List<ArrayRequest> group, AddressSet created, List<String> failures) {
+        Listing listing = program.getListing();
+        DataType elemType = group.get(0).elemType();
+        int elemLen = elemType.getLength();
+        long start = group.stream().mapToLong(ArrayRequest::start).min().getAsLong();
+        long end = group.stream().mapToLong(ArrayRequest::end).max().getAsLong();
+        String labels = String.join(", ", group.stream().map(ArrayRequest::label).toList());
+
+        try {
+            // Grow over existing arrays of the same element type (e.g. from an
+            // earlier Apply) so re-applying a subset never truncates them.
+            boolean grew = true;
+            while (grew) {
+                grew = false;
+                for (Data d : definedDataIn(listing, space.getAddress(start), space.getAddress(end))) {
+                    if (!isArrayOf(d, elemType)
+                            || (d.getAddress().getOffset() - start) % elemLen != 0) {
+                        continue;
+                    }
+                    long dStart = d.getAddress().getOffset();
+                    long dEnd = d.getMaxAddress().getOffset();
+                    if (dStart < start || dEnd > end) {
+                        start = Math.min(start, dStart);
+                        end = Math.max(end, dEnd);
+                        grew = true;
+                    }
+                }
+            }
+
+            Address startAddr = space.getAddress(start);
+            Address endAddr = space.getAddress(end);
+            if (created.intersects(startAddr, endAddr)) {
+                String failure = String.format("%s at 0x%X: overlaps a header or an array of a " +
+                        "different type applied in this batch; left unchanged", labels, start);
+                Msg.warn(DensoStructureApplier.class, failure);
+                failures.add(failure);
+            }
+            else {
+                Data existing = listing.getDefinedDataAt(startAddr);
+                boolean alreadyApplied = existing != null && isArrayOf(existing, elemType)
+                        && existing.getLength() == end - start + 1;
+                if (!alreadyApplied) {
+                    int count = (int) ((end - start + 1) / elemLen);
+                    listing.clearCodeUnits(startAddr, endAddr, false);
+                    listing.createData(startAddr, new ArrayDataType(elemType, count, elemLen));
+                }
+                created.add(startAddr, endAddr);
+            }
+
+            for (ArrayRequest r : group) {
+                program.getSymbolTable().createLabel(space.getAddress(r.start()), r.label(),
+                        SourceType.ANALYSIS);
+            }
+        } catch (Exception ex) {
+            String failure = String.format("%s at 0x%X: %s", labels, start, ex.getMessage());
             Msg.warn(DensoStructureApplier.class, "Array apply failed for " + failure);
             failures.add(failure);
         }
+    }
+
+    /** Defined data that starts in, or contains the start of, [start, end]. */
+    private static List<Data> definedDataIn(Listing listing, Address start, Address end) {
+        List<Data> result = new ArrayList<>();
+        Data containing = listing.getDefinedDataContaining(start);
+        if (containing != null) {
+            result.add(containing);
+        }
+        for (Data d : listing.getDefinedData(new AddressSet(start, end), true)) {
+            if (containing == null || !d.getAddress().equals(containing.getAddress())) {
+                result.add(d);
+            }
+        }
+        return result;
+    }
+
+    private static boolean isArrayOf(Data data, DataType elemType) {
+        return data.getDataType() instanceof Array array
+                && array.getDataType().isEquivalent(elemType);
     }
 
     // ── Header struct builders ────────────────────────────────────────────────
@@ -449,7 +577,9 @@ public final class DensoStructureApplier {
             title.setFont(titleFont().deriveFont(titleFont().getSize2D() - 1f));
 
             JTextArea hint = makeWrappedText(
-                    "Each row below is one range that will be cleared and recreated.",
+                    "Each row below is one range that will be cleared and recreated. " +
+                    "Overlapping arrays of the same type, such as shared axes, become " +
+                    "one array and each table keeps its own label.",
                     smallFont(), secondaryForeground());
 
             JPanel top = new JPanel();
