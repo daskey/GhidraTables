@@ -59,7 +59,7 @@ final class TestMemory {
                 }
             }
             transaction = null;
-            yield null;
+            yield (boolean) args[1];
         }
         default -> throw new UnsupportedOperationException(method);
     });
