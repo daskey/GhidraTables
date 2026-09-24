@@ -6,14 +6,14 @@ package denso.table.editor;
 
 import denso.table.editor.ui.DensoTableListProvider;
 import denso.table.editor.ui.GhidraTablesEditorFrame;
+import docking.widgets.OptionDialog;
 import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.plugin.ProgramPlugin;
+import ghidra.framework.model.DomainObject;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.program.model.listing.Program;
-import ghidra.program.util.ProgramLocation;
-import ghidra.program.util.ProgramSelection;
 
 /**
  * Main entry point for the GhidraTables extension.
@@ -30,7 +30,7 @@ import ghidra.program.util.ProgramSelection;
  *   <li>Open the plugin from <b>Window → GhidraTables</b>.</li>
  *   <li>Click <b>Scan ROM</b> (↻ toolbar icon).</li>
  *   <li>Double-click any table to open the editor.</li>
- *   <li>Edit values, then click <b>Apply Changes</b> to write back to the ROM.</li>
+ *   <li>Edit values, then click <b>Save</b> to write back to the program.</li>
  * </ol>
  */
 //@formatter:off
@@ -68,20 +68,37 @@ public class GhidraTablesPlugin extends ProgramPlugin {
     }
 
     @Override
-    protected void locationChanged(ProgramLocation loc) { /* not used */ }
+    protected void programClosed(Program program) {
+        // Editors keep a reference to their program; once it is closed a save
+        // would fail, so close them along with it.
+        listProvider.closeEditors(program);
+    }
 
     @Override
-    protected void selectionChanged(ProgramSelection sel) { /* not used */ }
+    protected boolean canCloseDomainObject(DomainObject dObj) {
+        if (dObj instanceof Program program) {
+            return confirmDiscardUnsavedEdits(listProvider.countUnsavedEditors(program));
+        }
+        return true;
+    }
+
+    @Override
+    protected boolean canClose() {
+        return confirmDiscardUnsavedEdits(listProvider.countUnsavedEditors(null));
+    }
 
     @Override
     protected void dispose() {
         listProvider.dispose();
     }
 
-    // ── Package-visible helpers ───────────────────────────────────────────────
-
-    /** Exposes the currently active program to the list provider and editor. */
-    public Program getCurrentProgram() {
-        return currentProgram;
+    private boolean confirmDiscardUnsavedEdits(int unsavedEditors) {
+        if (unsavedEditors == 0) {
+            return true;
+        }
+        int choice = OptionDialog.showYesNoDialog(tool.getToolFrame(), "Unsaved Table Edits",
+                unsavedEditors + " GhidraTables editor" + (unsavedEditors == 1 ? " has" : "s have") +
+                " unsaved changes that will be lost.\nClose anyway?");
+        return choice == OptionDialog.YES_OPTION;
     }
 }

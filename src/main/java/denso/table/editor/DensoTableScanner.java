@@ -45,8 +45,9 @@ public final class DensoTableScanner {
 
     private static final int MIN_POINTER_DISTANCE = 0x100;
     private static final int[] AMBIGUOUS_1D_NEIGHBOR_OFFSETS = { -20, -12, 12, 20 };
-    private static final int[] AMBIGUOUS_2D_NEIGHBOR_OFFSETS = { -28, -20, 20, 28 };
     private static final int LOCAL_DESCRIPTOR_SCAN_BYTES = 0x100;
+    /** How often (in bytes) progress is reported while walking a block. */
+    private static final int PROGRESS_INTERVAL_BYTES = 0x1000;
 
     // -------------------------------------------------------------------------
 
@@ -109,7 +110,7 @@ public final class DensoTableScanner {
         // Compute total size for progress reporting
         long totalBytes = 0;
         for (MemoryBlock b : blocks) {
-            if (b.isInitialized()) totalBytes += b.getSize();
+            if (isScannable(b, space)) totalBytes += b.getSize();
         }
         monitor.initialize(totalBytes);
         monitor.setMessage("Scanning for Denso tables…");
@@ -119,7 +120,11 @@ public final class DensoTableScanner {
         for (MemoryBlock block : blocks) {
             monitor.checkCancelled();
 
-            if (!block.isInitialized() || block.isExternalBlock()) {
+            // Header addresses and pointers are resolved in the default address
+            // space everywhere else (navigation, write-back, structure apply), so
+            // a header found in an overlay or other space would map to the wrong
+            // bytes. Only scan blocks that live in the default space.
+            if (!isScannable(block, space)) {
                 continue;
             }
 
@@ -140,6 +145,9 @@ public final class DensoTableScanner {
             // Walk 4-byte aligned positions
             for (int i = 0; i <= blockSize - 12; i += 4) {
                 monitor.checkCancelled();
+                if (i % PROGRESS_INTERVAL_BYTES == 0) {
+                    monitor.setProgress(scanned + i);
+                }
 
                 // ── Try 2-D first (needs at least 20 bytes for no-MAC, 28 for MAC) ──
                 if (i + 20 <= blockSize) {
@@ -167,6 +175,12 @@ public final class DensoTableScanner {
         }
 
         return results;
+    }
+
+    private static boolean isScannable(MemoryBlock block, AddressSpace space) {
+        return block.isInitialized()
+                && !block.isExternalBlock()
+                && block.getStart().getAddressSpace().equals(space);
     }
 
     // =========================================================================
@@ -527,15 +541,8 @@ public final class DensoTableScanner {
             long blockStartOff, long ptr, Memory memory, AddressSpace space) {
         long nextPtr = Long.MAX_VALUE;
 
-        for (int delta : AMBIGUOUS_1D_NEIGHBOR_OFFSETS) {
-            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, off + delta,
-                    blockStartOff, ptr, memory, space));
-        }
-        for (int delta : AMBIGUOUS_2D_NEIGHBOR_OFFSETS) {
-            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, off + delta,
-                    blockStartOff, ptr, memory, space));
-        }
-
+        // Every 4-byte aligned descriptor within +/- LOCAL_DESCRIPTOR_SCAN_BYTES,
+        // which already covers the immediate 1-D/2-D neighbor offsets.
         int scanStart = Math.max(0, off - LOCAL_DESCRIPTOR_SCAN_BYTES);
         int scanEnd = Math.min(buf.length - 12, off + LOCAL_DESCRIPTOR_SCAN_BYTES);
         for (int neighborOff = scanStart; neighborOff <= scanEnd; neighborOff += 4) {

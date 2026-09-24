@@ -41,6 +41,65 @@ public enum DensoTableType {
     /** Returns true for all well-defined types. */
     public boolean isValid() { return this != UNDEFINED; }
 
+    /** Returns true for integer storage types, whose raw values are whole numbers. */
+    public boolean isIntegral() { return this != FLOAT && this != UNDEFINED; }
+
+    /** Smallest raw value this type can store. */
+    public double getMinRaw() {
+        return switch (this) {
+            case FLOAT   -> -Float.MAX_VALUE;
+            case UINT8, UINT16, UINT32 -> 0;
+            case INT8    -> Byte.MIN_VALUE;
+            case INT16   -> Short.MIN_VALUE;
+            default      -> -Double.MAX_VALUE;
+        };
+    }
+
+    /** Largest raw value this type can store. */
+    public double getMaxRaw() {
+        return switch (this) {
+            case FLOAT   -> Float.MAX_VALUE;
+            case UINT8   -> 0xFF;
+            case UINT16  -> 0xFFFF;
+            case UINT32  -> 0xFFFFFFFFL;
+            case INT8    -> Byte.MAX_VALUE;
+            case INT16   -> Short.MAX_VALUE;
+            default      -> Double.MAX_VALUE;
+        };
+    }
+
+    /**
+     * Returns true when {@link #doubleToRaw(double)} would accept {@code raw},
+     * i.e. it is finite and, after rounding, fits in this storage type.
+     */
+    public boolean isRawInRange(double raw) {
+        try {
+            doubleToRaw(raw);
+            return true;
+        }
+        catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Returns the value that would actually be stored for {@code raw}: integer
+     * types are rounded the same way {@link #doubleToRaw(double)} rounds, floats
+     * are narrowed to 32-bit precision, and both saturate at the type's range.
+     * NaN is returned unchanged so callers can reject it.
+     */
+    public double quantizeRaw(double raw) {
+        if (Double.isNaN(raw)) {
+            return raw;
+        }
+        double clamped = Math.max(getMinRaw(), Math.min(getMaxRaw(), raw));
+        return switch (this) {
+            case FLOAT     -> (float) clamped;
+            case UNDEFINED -> clamped;
+            default        -> Math.round(clamped);
+        };
+    }
+
     /**
      * Resolves a raw type code byte to the matching enum constant.
      * Returns {@link #UNDEFINED} when the code is not recognised.

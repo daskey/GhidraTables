@@ -22,7 +22,6 @@ import generic.theme.Gui;
  *   <li><b>X_HEADER</b> – top row (X-axis values), col > 0.</li>
  *   <li><b>Y_HEADER</b> – leftmost column (Y-axis values), row > 0.</li>
  *   <li><b>DATA</b>     – the editable value cells.</li>
- *   <li><b>DATA_2D</b>  – X-axis row in the 2-D view (row 0).</li>
  * </ul>
  */
 public class HeatMapCellRenderer extends DefaultTableCellRenderer {
