@@ -39,8 +39,19 @@ repositories {
 
 dependencies {
 	implementation 'org.jzy3d:jzy3d-emul-gl-awt:2.2.1'
+	testImplementation 'junit:junit:4.13.2'
+}
+
+test {
+	useJUnit()
+	testLogging {
+		exceptionFormat = 'full'
+	}
+	// Swing component tests run without a display; window integration tests use Xvfb.
+	systemProperty 'java.awt.headless', System.getProperty('java.awt.headless', 'true')
 }
 
 buildExtension.configure {
 	exclude '.claude/**'
+	exclude 'lib/*-tests.jar'
 }

@@ -45,7 +45,6 @@ public final class DensoTableScanner {
 
     private static final int MIN_POINTER_DISTANCE = 0x100;
     private static final int[] AMBIGUOUS_1D_NEIGHBOR_OFFSETS = { -20, -12, 12, 20 };
-    private static final int[] AMBIGUOUS_2D_NEIGHBOR_OFFSETS = { -28, -20, 20, 28 };
     private static final int LOCAL_DESCRIPTOR_SCAN_BYTES = 0x100;
 
     // -------------------------------------------------------------------------
@@ -105,68 +104,65 @@ public final class DensoTableScanner {
         AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
 
         MemoryBlock[] blocks = memory.getBlocks();
-
-        // Compute total size for progress reporting
         long totalBytes = 0;
-        for (MemoryBlock b : blocks) {
-            if (b.isInitialized()) totalBytes += b.getSize();
+        for (MemoryBlock block : blocks) {
+            if (isScannable(block, space)) totalBytes += block.getSize();
         }
         monitor.initialize(totalBytes);
         monitor.setMessage("Scanning for Denso tables…");
 
         long scanned = 0;
-
+        final int chunkSize = 1024 * 1024;
         for (MemoryBlock block : blocks) {
             monitor.checkCancelled();
-
-            if (!block.isInitialized() || block.isExternalBlock()) {
-                continue;
-            }
-
-            long blockStartOff = block.getStart().getOffset();
-            int  blockSize     = (int) Math.min(block.getSize(), Integer.MAX_VALUE);
-
-            // Read the whole block into a local buffer for fast access
-            byte[] buf = new byte[blockSize];
-            try {
-                memory.getBytes(block.getStart(), buf);
-            }
-            catch (MemoryAccessException e) {
-                scanned += blockSize;
-                monitor.setProgress(scanned);
-                continue;
-            }
-
-            // Walk 4-byte aligned positions
-            for (int i = 0; i <= blockSize - 12; i += 4) {
+            if (!isScannable(block, space)) continue;
+            long blockStart = block.getStart().getOffset();
+            long size = block.getSize();
+            // Align absolute addresses, including memory blocks with an unaligned start.
+            long cursor = (4 - (blockStart & 3)) & 3;
+            for (long chunk = 0; chunk < size; chunk += chunkSize) {
                 monitor.checkCancelled();
-
-                // ── Try 2-D first (needs at least 20 bytes for no-MAC, 28 for MAC) ──
-                if (i + 20 <= blockSize) {
-                    DensoTable2D t2 = tryParse2D(buf, i, blockStartOff, memory, space);
-                    if (t2 != null) {
-                        results.add(t2);
-                        // Skip past the header so we don't double-detect
-                        i += (t2.isHasMAC() ? 28 : 20) - 4;
-                        continue;
+                long end = Math.min(size, chunk + chunkSize);
+                // Retain neighboring descriptors for compact-payload inference at chunk edges.
+                long readStart = Math.max(0, chunk - LOCAL_DESCRIPTOR_SCAN_BYTES);
+                long readEnd = Math.min(size, end + LOCAL_DESCRIPTOR_SCAN_BYTES + 28);
+                byte[] buf = new byte[(int) (readEnd - readStart)];
+                try {
+                    if (memory.getBytes(block.getStart().add(readStart), buf) != buf.length) {
+                        throw new MemoryAccessException("Incomplete block read");
+                    }
+                } catch (MemoryAccessException ex) {
+                    cursor = end + ((4 - ((blockStart + end) & 3)) & 3);
+                    monitor.setProgress(scanned + end);
+                    continue;
+                }
+                while (cursor < end && cursor + 12 <= size) {
+                    monitor.checkCancelled();
+                    if (((blockStart + cursor) & 0xfff) == 0) monitor.setProgress(scanned + cursor);
+                    int i = (int) (cursor - readStart);
+                    DensoTable candidate = i + 20 <= buf.length
+                            ? tryParse2D(buf, i, blockStart + readStart, memory, space) : null;
+                    if (candidate == null) {
+                        candidate = tryParse1D(buf, i, blockStart + readStart, memory, space);
+                    }
+                    if (candidate != null) {
+                        results.add(candidate);
+                        cursor += (candidate.is2D() ? 20 : 12) + (candidate.isHasMAC() ? 8 : 0);
+                    } else {
+                        cursor += 4;
                     }
                 }
-
-                // ── Then try 1-D ─────────────────────────────────────────────────
-                if (i + 12 <= blockSize) {
-                    DensoTable1D t1 = tryParse1D(buf, i, blockStartOff, memory, space);
-                    if (t1 != null) {
-                        results.add(t1);
-                        i += (t1.isHasMAC() ? 20 : 12) - 4;
-                    }
-                }
+                monitor.setProgress(scanned + end);
             }
-
-            scanned += blockSize;
-            monitor.setProgress(scanned);
+            scanned += size;
         }
 
         return results;
+    }
+
+    private static boolean isScannable(MemoryBlock block, AddressSpace space) {
+        return block.isInitialized() && !block.isExternalBlock()
+                && block.getStart().getAddressSpace().equals(space);
     }
 
     // =========================================================================
@@ -527,16 +523,8 @@ public final class DensoTableScanner {
             long blockStartOff, long ptr, Memory memory, AddressSpace space) {
         long nextPtr = Long.MAX_VALUE;
 
-        for (int delta : AMBIGUOUS_1D_NEIGHBOR_OFFSETS) {
-            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, off + delta,
-                    blockStartOff, ptr, memory, space));
-        }
-        for (int delta : AMBIGUOUS_2D_NEIGHBOR_OFFSETS) {
-            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, off + delta,
-                    blockStartOff, ptr, memory, space));
-        }
-
         int scanStart = Math.max(0, off - LOCAL_DESCRIPTOR_SCAN_BYTES);
+        scanStart += Math.floorMod(off - scanStart, 4);
         int scanEnd = Math.min(buf.length - 12, off + LOCAL_DESCRIPTOR_SCAN_BYTES);
         for (int neighborOff = scanStart; neighborOff <= scanEnd; neighborOff += 4) {
             nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, neighborOff,
@@ -662,7 +650,7 @@ public final class DensoTableScanner {
         try {
             Address addr = space.getAddress(ptr);
             byte[] raw = new byte[count * 4];
-            mem.getBytes(addr, raw);
+            if (mem.getBytes(addr, raw) != raw.length) return null;
             float[] out = new float[count];
             for (int i = 0; i < count; i++) {
                 out[i] = readFloatBE(raw, i * 4);
@@ -679,7 +667,7 @@ public final class DensoTableScanner {
         try {
             Address addr = space.getAddress(ptr);
             byte[] raw = new byte[size];
-            mem.getBytes(addr, raw);
+            if (mem.getBytes(addr, raw) != raw.length) return null;
             return raw;
         }
         catch (Exception e) {
@@ -694,7 +682,7 @@ public final class DensoTableScanner {
             int elemSize = dtype.getValueSize();
             Address addr = space.getAddress(ptr);
             byte[] raw = new byte[count * elemSize];
-            mem.getBytes(addr, raw);
+            if (mem.getBytes(addr, raw) != raw.length) return null;
             double[] out = new double[count];
             for (int i = 0; i < count; i++) {
                 long rawVal = readBigEndian(raw, i * elemSize, elemSize);
@@ -714,7 +702,7 @@ public final class DensoTableScanner {
             int elemSize = dtype.getValueSize();
             Address addr = space.getAddress(ptr);
             byte[] raw = new byte[countX * countY * elemSize];
-            mem.getBytes(addr, raw);
+            if (mem.getBytes(addr, raw) != raw.length) return null;
             double[][] out = new double[countY][countX];
             for (int y = 0; y < countY; y++) {
                 for (int x = 0; x < countX; x++) {
@@ -824,7 +812,8 @@ public final class DensoTableScanner {
             Memory memory, AddressSpace space) {
         if (Math.abs(ptr - headerAddr) < MIN_POINTER_DISTANCE) return false;
         try {
-            return memory.contains(space.getAddress(ptr));
+            MemoryBlock block = memory.getBlock(space.getAddress(ptr));
+            return block != null && block.isInitialized();
         }
         catch (Exception e) {
             return false;

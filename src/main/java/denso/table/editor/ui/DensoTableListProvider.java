@@ -7,6 +7,7 @@ package denso.table.editor.ui;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.swing.*;
 
@@ -53,6 +54,9 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     private DockingAction applyStructureAction;
     private final AtomicLong scanGeneration = new AtomicLong();
     private List<DensoTable> currentTables = List.of();
+    private final List<GhidraTablesEditorFrame> editors = new ArrayList<>();
+    private boolean disposed;
+    private volatile TaskMonitor activeScanMonitor;
 
     // ── Construction ──────────────────────────────────────────────────────────
 
@@ -73,6 +77,10 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     public JComponent getComponent() { return root; }
 
     public void dispose() {
+        disposed = true;
+        cancelScan();
+        for (GhidraTablesEditorFrame editor : List.copyOf(editors)) editor.dispose();
+        editors.clear();
         filterTable.dispose();
         removeFromTool();
     }
@@ -80,11 +88,12 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     // ── Public API ────────────────────────────────────────────────────────────
 
     public void scanProgram(Program program) {
-        if (program == null) {
-            model.setTables(List.of());
-            statusLabel.setText("No program loaded.");
+        if (disposed) return;
+        if (program == null || program.isClosed()) {
+            programChanged(null);
             return;
         }
+        cancelScan();
 
         long scanId = scanGeneration.incrementAndGet();
         Program scannedProgram = program;
@@ -94,7 +103,17 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         Task task = new Task("Scanning for Denso tables", true, true, false) {
             @Override
             public void run(TaskMonitor monitor) {
+                if (scanGeneration.get() != scanId) return;
+                activeScanMonitor = monitor;
+                // Keep the program alive while the worker reads it, even if its tab closes.
+                boolean retained = scannedProgram.addConsumer(this);
                 try {
+                    if (!retained) {
+                        SwingUtilities.invokeLater(() ->
+                                completeScan(scanId, scannedProgram, null, null, true));
+                        return;
+                    }
+                    if (scanGeneration.get() != scanId) return;
                     List<DensoTable> tables = DensoTableScanner.scan(scannedProgram, monitor);
                     SwingUtilities.invokeLater(() ->
                             completeScan(scanId, scannedProgram, tables, null, false));
@@ -106,6 +125,9 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
                 catch (RuntimeException ex) {
                     SwingUtilities.invokeLater(() ->
                             completeScan(scanId, scannedProgram, null, ex, false));
+                } finally {
+                    if (activeScanMonitor == monitor) activeScanMonitor = null;
+                    if (retained) scannedProgram.release(this);
                 }
             }
         };
@@ -114,7 +136,7 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     }
 
     public void programChanged(Program program) {
-        scanGeneration.incrementAndGet();
+        cancelScan();
         currentTables = List.of();
         model.setTables(List.of());
         updateOverview(program, currentTables);
@@ -122,7 +144,7 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
                 ? "No program loaded - click Scan to begin."
                 : "Program loaded - click Scan to find tables.");
         if (scanAction != null) {
-            scanAction.setEnabled(true);
+            scanAction.setEnabled(program != null);
         }
     }
 
@@ -194,8 +216,12 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         jt.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2) {
+                if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
+                    int viewRow = jt.rowAtPoint(e.getPoint());
+                    if (viewRow < 0) return;
                     int viewCol  = jt.columnAtPoint(e.getPoint());
+                    if (viewCol < 0) return;
+                    jt.setRowSelectionInterval(viewRow, viewRow);
                     String colName = jt.getColumnModel().getColumn(viewCol)
                                        .getHeaderValue().toString();
                     if (DensoTableListModel.HEADER_ADDRESS_COLUMN.equals(colName)) {
@@ -295,13 +321,60 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
         if (sel.isEmpty()) return;
 
         Program prog = plugin.getCurrentProgram();
+        if (prog == null || prog.isClosed()) return;
         Window owner = SwingUtilities.getWindowAncestor(filterTable);
+        for (DensoTable table : sel) {
+            GhidraTablesEditorFrame existing = editors.stream()
+                    .filter(e -> e.getProgram() == prog && e.getHeaderAddress() == table.getHeaderAddress())
+                    .findFirst().orElse(null);
+            if (existing != null) {
+                existing.setExtendedState(existing.getExtendedState() & ~Frame.ICONIFIED);
+                existing.setVisible(true);
+                existing.toFront();
+                existing.requestFocus();
+                continue;
+            }
+            try {
+                GhidraTablesEditorFrame frame = new GhidraTablesEditorFrame(
+                        table.copy(), prog, plugin.getTool(), owner);
+                editors.add(frame);
+                frame.addWindowListener(new WindowAdapter() {
+                    @Override public void windowClosed(WindowEvent e) { editors.remove(frame); }
+                });
+                frame.setSavedListener(() -> {
+                    if (disposed || plugin.getCurrentProgram() != prog) return;
+                    currentTables = currentTables.stream()
+                            .map(t -> t.getHeaderAddress() == frame.getHeaderAddress()
+                                    ? frame.getTableSnapshot() : t).toList();
+                    model.setTables(currentTables);
+                });
+                frame.setVisible(true);
+            } catch (RuntimeException ex) {
+                Msg.showError(this, owner, "Open Table", ex.getMessage(), ex);
+            }
+        }
+    }
 
-        for (DensoTable t : sel) {
-            DensoTable detachedTable = t.copy();
-            GhidraTablesEditorFrame frame = new GhidraTablesEditorFrame(
-                    detachedTable, prog, plugin.getTool(), owner);
-            frame.setVisible(true);
+    private void cancelScan() {
+        scanGeneration.incrementAndGet();
+        TaskMonitor monitor = activeScanMonitor;
+        if (monitor != null) monitor.cancel();
+    }
+
+    public boolean canCloseEditors(Program program) {
+        boolean unsaved = editors.stream().anyMatch(e ->
+                (program == null || e.getProgram() == program) && e.hasUnsavedChanges());
+        return !unsaved || JOptionPane.showConfirmDialog(root,
+                "Table editors have unsaved changes. Discard them and close?", "Unsaved Table Changes",
+                JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE) == JOptionPane.YES_OPTION;
+    }
+
+    public void programClosed(Program program) {
+        for (GhidraTablesEditorFrame editor : List.copyOf(editors)) {
+            if (editor.getProgram() == program) {
+                editors.remove(editor);
+                editor.dispose();
+            }
         }
     }
 
@@ -372,7 +445,8 @@ public class DensoTableListProvider extends ComponentProviderAdapter {
     }
 
     private boolean isCurrentScan(long scanId, Program scannedProgram) {
-        return scanGeneration.get() == scanId && plugin.getCurrentProgram() == scannedProgram;
+        return !disposed && !scannedProgram.isClosed()
+                && scanGeneration.get() == scanId && plugin.getCurrentProgram() == scannedProgram;
     }
 
     private void updateOverview(Program program, List<DensoTable> tables) {

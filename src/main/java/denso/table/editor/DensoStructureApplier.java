@@ -17,7 +17,6 @@ import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.*;
 import ghidra.util.Msg;
-import ghidra.util.exception.CancelledException;
 
 /**
  * Utility for applying Ghidra data type structures to the addresses of
@@ -69,16 +68,20 @@ public final class DensoStructureApplier {
         Options opts = dlg.getOptions();
         int tx = program.startTransaction("Apply Denso Table Structures");
         boolean success = false;
+        Exception failure = null;
         try {
             for (DensoTable t : tables) {
                 applyToTable(program, t, opts);
             }
             success = true;
         } catch (Exception ex) {
-            Msg.showError(DensoStructureApplier.class, parent,
-                    "Structure Error", ex.getMessage(), ex);
+            failure = ex;
         } finally {
             program.endTransaction(tx, success);
+        }
+        if (failure != null) {
+            Msg.showError(DensoStructureApplier.class, parent, "Structure Error",
+                    "Structure changes were rolled back. " + failure.getMessage(), failure);
         }
         return success;
     }
@@ -88,7 +91,7 @@ public final class DensoStructureApplier {
     // =========================================================================
 
     private static void applyToTable(ghidra.program.model.listing.Program program,
-            DensoTable table, Options opts) {
+            DensoTable table, Options opts) throws Exception {
 
         AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
         Listing listing = program.getListing();
@@ -101,8 +104,8 @@ public final class DensoStructureApplier {
                 listing.createData(addr, hdr);
                 program.getSymbolTable().createLabel(addr, table.getName(), SourceType.ANALYSIS);
             } catch (Exception ex) {
-                Msg.warn(DensoStructureApplier.class,
-                        "Header struct failed for " + table.getName() + ": " + ex.getMessage());
+                throw new IllegalStateException(
+                        "Header failed for " + table.getName() + ": " + ex.getMessage(), ex);
             }
         }
 
@@ -136,7 +139,7 @@ public final class DensoStructureApplier {
 
     private static void applyArray(ghidra.program.model.listing.Program program,
             Listing listing, AddressSpace space,
-            long ptr, DataType elemType, int count, String label) {
+            long ptr, DataType elemType, int count, String label) throws Exception {
         try {
             ArrayDataType arr = new ArrayDataType(elemType, count, elemType.getLength());
             Address addr = space.getAddress(ptr);
@@ -144,9 +147,9 @@ public final class DensoStructureApplier {
             listing.createData(addr, arr);
             program.getSymbolTable().createLabel(addr, label, SourceType.ANALYSIS);
         } catch (Exception ex) {
-            Msg.warn(DensoStructureApplier.class,
+            throw new IllegalStateException(
                     "Array apply failed for " + label + " at 0x"
-                    + Long.toHexString(ptr) + ": " + ex.getMessage());
+                    + Long.toHexString(ptr) + ": " + ex.getMessage(), ex);
         }
     }
 
@@ -170,10 +173,12 @@ public final class DensoStructureApplier {
             s.add(ptr32,                   4, "ptrX",      "Pointer to X-axis float array");
             s.add(ptr32,                   4, "ptrY",      "Pointer to Y-axis float array");
             s.add(ptr32,                   4, "ptrZ",      "Pointer to Z-data array");
-            s.add(DWordDataType.dataType,  4, "tableType", "Data type code (little-endian)");
+            s.add(ByteDataType.dataType, 1, "tableType", "Data type code");
+            s.add(new ArrayDataType(ByteDataType.dataType, 3, 1), 3, "reserved", "Zero padding");
         } else {
             s.add(ShortDataType.dataType,  2, "countX",    "Number of entries");
-            s.add(ShortDataType.dataType,  2, "tableType", "Data type code (little-endian)");
+            s.add(ByteDataType.dataType, 1, "tableType", "Data type code");
+            s.add(ByteDataType.dataType, 1, "reserved", "Zero padding");
             s.add(ptr32,                   4, "ptrX",      "Pointer to X-axis float array");
             s.add(ptr32,                   4, "ptrY",      "Pointer to Y-data array");
         }
@@ -193,7 +198,7 @@ public final class DensoStructureApplier {
             case FLOAT:  return FloatDataType.dataType;
             case UINT8:  return ByteDataType.dataType;
             case UINT16: return WordDataType.dataType;
-            case INT8:   return CharDataType.dataType;
+            case INT8:   return SignedByteDataType.dataType;
             case INT16:  return ShortDataType.dataType;
             case UINT32: return DWordDataType.dataType;
             default:     return ByteDataType.dataType;
@@ -206,7 +211,7 @@ public final class DensoStructureApplier {
             case FLOAT:  return "float";
             case UINT8:  return "byte";
             case UINT16: return "word";
-            case INT8:   return "char";
+            case INT8:   return "sbyte";
             case INT16:  return "short";
             case UINT32: return "dword";
             default:     return "byte";
@@ -237,7 +242,8 @@ public final class DensoStructureApplier {
         private boolean confirmed = false;
 
         public ApplyStructureDialog(List<DensoTable> tables, Component parent) {
-            super(SwingUtilities.getWindowAncestor(parent),
+            super(parent instanceof Window window ? window
+                    : parent == null ? null : SwingUtilities.getWindowAncestor(parent),
                     "Apply Table Structures", ModalityType.APPLICATION_MODAL);
             this.tables = List.copyOf(tables);
             this.hasAny2D = tables.stream().anyMatch(DensoTable::is2D);

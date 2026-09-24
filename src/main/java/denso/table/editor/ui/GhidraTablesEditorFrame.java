@@ -13,19 +13,17 @@ import java.util.DoubleSummaryStatistics;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.IntFunction;
-import java.util.function.IntToDoubleFunction;
 import java.util.function.Supplier;
 import javax.swing.*;
-import javax.swing.event.*;
 import javax.swing.table.*;
 
 import denso.table.editor.DensoStructureApplier;
+import denso.table.editor.DensoTableIO;
 import denso.table.editor.model.*;
 import ghidra.app.services.GoToService;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.*;
 import ghidra.program.model.listing.Program;
-import ghidra.program.model.mem.*;
 import ghidra.util.Msg;
 
 /**
@@ -81,11 +79,6 @@ public class GhidraTablesEditorFrame extends JFrame {
 
     private static final class OperationStats {
         int spans;
-        int cells;
-
-        boolean changed() {
-            return cells > 0;
-        }
     }
 
     // ── Model ─────────────────────────────────────────────────────────────────
@@ -135,10 +128,8 @@ public class GhidraTablesEditorFrame extends JFrame {
     private JPanel overviewContent;
     private JButton overviewToggleBtn;
 
-    // Undo support (single-level)
-    private double[][] undoValues2D;
-    private double[] undoValues1D;
-    private String undoDescription;
+    private final TableEditHistory history;
+    private Runnable savedListener = () -> {};
 
     // Zoom override for density
     private boolean userZoomLocked = false;
@@ -150,11 +141,6 @@ public class GhidraTablesEditorFrame extends JFrame {
     /** True when only the MAC header fields have been modified in the editor. */
     private boolean macDirty = false;
 
-    /**
-     * Set to true during programmatic data loads (initial load, revert) to
-     * suppress the dirty-marking side-effect of fireTableDataChanged.
-     */
-    private boolean loading = false;
     private int currentCellWidth = 76;
     private int currentRowHeight = 28;
     private int currentRowHeaderWidth = 76;
@@ -167,6 +153,14 @@ public class GhidraTablesEditorFrame extends JFrame {
         this.table   = table;
         this.program = program;
         this.tool    = tool;
+        if (program != null) {
+            try {
+                DensoTableIO.reload(program, table);
+            } catch (Exception ex) {
+                throw new IllegalStateException("Unable to read table from ROM: " + ex.getMessage(), ex);
+            }
+        }
+        history = new TableEditHistory(table);
 
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         addWindowListener(new WindowAdapter() {
@@ -188,8 +182,6 @@ public class GhidraTablesEditorFrame extends JFrame {
             }
         });
 
-        // Always read fresh from ROM so the display is never stale from scan data
-        loadFromRom();
         syncMacUi();
         refreshGridFromModel();
 
@@ -359,28 +351,6 @@ public class GhidraTablesEditorFrame extends JFrame {
         return btn;
     }
 
-    private JButton makeSmallBtn(String text, String tooltip, ActionListener al) {
-        JButton btn = new JButton(text);
-        btn.setFont(UI_FONT_BOLD);
-        btn.setFocusPainted(false);
-        btn.setMargin(new Insets(3, 8, 3, 8));
-        btn.setToolTipText(tooltip);
-        btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        btn.setBorderPainted(true);
-        btn.addMouseListener(new MouseAdapter() {
-            Color normalBg;
-            @Override public void mouseEntered(MouseEvent e) {
-                normalBg = btn.getBackground();
-                btn.setBackground(GhidraTheme.cardHoverBackground());
-            }
-            @Override public void mouseExited(MouseEvent e) {
-                if (normalBg != null) btn.setBackground(normalBg);
-            }
-        });
-        if (al != null) btn.addActionListener(al);
-        return btn;
-    }
-
     private JButton makeToolbarBtn(String text, String tooltip, ActionListener al) {
         JButton btn = new JButton(text);
         btn.setFont(UI_FONT_BOLD);
@@ -457,9 +427,6 @@ public class GhidraTablesEditorFrame extends JFrame {
         viewCardLayout = new CardLayout();
         viewCards = new JPanel(viewCardLayout);
         viewCards.add(workspace, CARD_GRID);
-
-        surface3DPanel = new Surface3DPanel();
-        viewCards.add(surface3DPanel, CARD_3D);
 
         inspectorScrollPane = new JScrollPane(buildInspectorPanel());
         inspectorScrollPane.setBorder(BorderFactory.createEmptyBorder());
@@ -566,14 +533,16 @@ public class GhidraTablesEditorFrame extends JFrame {
         header.add(titleLabel, BorderLayout.CENTER);
         header.add(summaryLabel, BorderLayout.EAST);
 
+        Runnable toggle = () -> {
+            boolean show = !content.isVisible();
+            content.setVisible(show);
+            overviewToggleBtn.setText(show ? "\u25BC" : "\u25B6");
+            summaryLabel.setVisible(!show);
+            card.revalidate();
+        };
+        overviewToggleBtn.addActionListener(e -> toggle.run());
         header.addMouseListener(new MouseAdapter() {
-            @Override public void mouseClicked(MouseEvent e) {
-                boolean show = !content.isVisible();
-                content.setVisible(show);
-                overviewToggleBtn.setText(show ? "\u25BC" : "\u25B6");
-                summaryLabel.setVisible(!show);
-                card.revalidate();
-            }
+            @Override public void mouseClicked(MouseEvent e) { toggle.run(); }
         });
 
         card.add(header, BorderLayout.NORTH);
@@ -640,6 +609,14 @@ public class GhidraTablesEditorFrame extends JFrame {
                 UI_FONT_SMALL.deriveFont(Font.ITALIC),
                 GhidraTheme.secondaryForeground());
         macExprLabel.setAlignmentX(0f);
+
+        javax.swing.event.DocumentListener macTextListener = new javax.swing.event.DocumentListener() {
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { refreshDirtyState(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refreshDirtyState(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refreshDirtyState(); }
+        };
+        multField.getDocument().addDocumentListener(macTextListener);
+        offField.getDocument().addDocumentListener(macTextListener);
 
         ActionListener commit = e -> commitMacFields();
         multField.addActionListener(commit);
@@ -822,7 +799,8 @@ public class GhidraTablesEditorFrame extends JFrame {
         refreshHeatRange();
         grid.setDefaultRenderer(Object.class, renderer);
 
-        editor = new MultiEditTableCellEditor();
+        editor = new MultiEditTableCellEditor(this::commitSelectedValue);
+        editor.setChangeListener(this::refreshDirtyState);
         grid.setDefaultEditor(Object.class, editor);
 
         autoSizeColumns();
@@ -836,43 +814,58 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         tableModel.addTableModelListener(e -> {
             refreshHeatRange();
-            if (!loading) markDataDirty();
             updateTableStats();
+            updateStatus();
             if (showing3D && surface3DPanel != null) {
                 surface3DPanel.refresh(table);
             }
         });
 
-        // ── Scroll wheel: adjust selected data cells ──────────────────────────
+        // Only wheel over selected data adjusts values; everywhere else scrolls.
         grid.addMouseWheelListener(e -> {
-            int[] selRows = grid.getSelectedRows();
-            int[] selCols = grid.getSelectedColumns();
-
-            boolean hasDataCells = false;
-            outer:
-            for (int r : selRows) {
-                int mr = grid.convertRowIndexToModel(r);
-                for (int c : selCols) {
-                    if (tableModel.isCellEditable(mr, grid.convertColumnIndexToModel(c))) {
-                        hasDataCells = true;
-                        break outer;
-                    }
+            int row = grid.rowAtPoint(e.getPoint());
+            int col = grid.columnAtPoint(e.getPoint());
+            if (row < 0 || col < 0 || !grid.isCellSelected(row, col)
+                    || !tableModel.isCellEditable(grid.convertRowIndexToModel(row),
+                            grid.convertColumnIndexToModel(col))) {
+                if (tableScrollPane != null) {
+                    Point point = SwingUtilities.convertPoint(grid, e.getPoint(), tableScrollPane);
+                    tableScrollPane.dispatchEvent(new MouseWheelEvent(tableScrollPane, e.getID(),
+                            e.getWhen(), e.getModifiersEx(), point.x, point.y,
+                            e.getXOnScreen(), e.getYOnScreen(), e.getClickCount(), e.isPopupTrigger(),
+                            e.getScrollType(), e.getScrollAmount(), e.getWheelRotation(),
+                            e.getPreciseWheelRotation()));
                 }
+                return;
             }
-            if (!hasDataCells) return; // let the scroll pane scroll normally
-
-            double step;
-            String stepLabel;
-            if (e.isShiftDown() && e.isControlDown()) { step = 0.01; stepLabel = "\u00D70.01"; }
-            else if (e.isShiftDown())                  { step = 10.0; stepLabel = "\u00D710"; }
-            else if (e.isControlDown())                { step = 0.1;  stepLabel = "\u00D70.1"; }
-            else                                       { step = 1.0;  stepLabel = "\u00D71"; }
-
-            saveUndoState("scroll-adjust");
-            adjustSelectedCells(-e.getWheelRotation() * step);
-            statusLabel.setText(String.format("Scroll %s \u00B7 Shift=\u00D710 \u00B7 Ctrl=fine \u00B7 Shift+Ctrl=\u00D70.01",
-                    stepLabel));
             e.consume();
+            if (!finishCellEditing()) return;
+            double step = e.isControlDown() ? (e.isShiftDown() ? 0.01 : 0.1)
+                    : e.isShiftDown() ? 10 : 1;
+            String key = Arrays.toString(grid.getSelectedRows()) + ":"
+                    + Arrays.toString(grid.getSelectedColumns()) + ":" + step;
+            try {
+                if (commitEdit("scroll-adjust", key,
+                        () -> adjustSelectedCells(-e.getWheelRotation() * step))) {
+                    statusLabel.setText("Adjusted selected cells; integer values round to storage units.");
+                }
+            } catch (IllegalArgumentException ex) {
+                statusLabel.setText(ex.getMessage());
+            }
+        });
+        grid.getSelectionModel().addListSelectionListener(e -> history.breakMerge());
+        grid.getColumnModel().getSelectionModel().addListSelectionListener(e -> history.breakMerge());
+
+        bindShortcut(KeyEvent.VK_Z, InputEvent.CTRL_DOWN_MASK, "undo", this::undoLastOperation);
+        bindShortcut(KeyEvent.VK_Y, InputEvent.CTRL_DOWN_MASK, "redo", this::redoLastOperation);
+        bindShortcut(KeyEvent.VK_Z, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK,
+                "redo", this::redoLastOperation);
+        bindShortcut(KeyEvent.VK_C, InputEvent.CTRL_DOWN_MASK, "copy", this::copySelectedCells);
+        bindShortcut(KeyEvent.VK_V, InputEvent.CTRL_DOWN_MASK, "paste", this::pasteIntoCells);
+        getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .put(KeyStroke.getKeyStroke(KeyEvent.VK_S, InputEvent.CTRL_DOWN_MASK), "save");
+        getRootPane().getActionMap().put("save", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { applyChanges(); }
         });
 
         // ── Ctrl+/- zoom override ──────────────────────────────────────────
@@ -919,9 +912,9 @@ public class GhidraTablesEditorFrame extends JFrame {
         miInterp.addActionListener(e -> interpolateSelected());
         miSmooth.addActionListener(e -> smoothSelected());
         miSetValue.addActionListener(e -> setValueDialog());
-        miSetZero.addActionListener(e -> { saveUndoState("set-zero"); fillSelectedCells(0); });
-        miFillRight.addActionListener(e -> { saveUndoState("fill-right"); fillRight(); });
-        miFillDown.addActionListener(e -> { saveUndoState("fill-down"); fillDown(); });
+        miSetZero.addActionListener(e -> fillSelectedCells(0));
+        miFillRight.addActionListener(e -> fillRight());
+        miFillDown.addActionListener(e -> fillDown());
         miUndoCtx.addActionListener(e -> undoLastOperation());
 
         cellMenu.add(miCopy);
@@ -964,6 +957,7 @@ public class GhidraTablesEditorFrame extends JFrame {
 
     /** Sets the raw value at the given model cell. */
     private void setRawValue(int modelRow, int modelCol, double raw) {
+        raw = table.getDataType().quantize(raw);
         if (table.is2D()) {
             ((DensoTable2D) table).setZ(modelRow, modelCol, raw);
         } else {
@@ -975,44 +969,64 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     /**
-     * Fires a full table data changed event and then restores the previous cell
-     * selection (which JTable clears on fireTableDataChanged).
+     * Refreshes all values without clearing the selection or restarting an edit.
      */
     private void fireAndRestoreSelection() {
-        int[] selRows = grid.getSelectedRows();
-        int[] selCols = grid.getSelectedColumns();
-        tableModel.fireTableDataChanged();  // triggers refreshHeatRange + dirty state via listener
-        grid.clearSelection();
-        for (int r : selRows) grid.addRowSelectionInterval(r, r);
-        for (int c : selCols) grid.addColumnSelectionInterval(c, c);
+        tableModel.fireTableRowsUpdated(0, tableModel.getRowCount() - 1);
     }
 
-    // =========================================================================
-    // Cell editing operations
-    // =========================================================================
+    private void bindShortcut(int key, int modifiers, String name, Runnable action) {
+        grid.getInputMap(JComponent.WHEN_FOCUSED).put(KeyStroke.getKeyStroke(key, modifiers), name);
+        grid.getActionMap().put(name, new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { action.run(); }
+        });
+    }
 
-    /**
-     * Adds {@code delta} (in physical units) to every selected data cell.
-     * Uses per-cell updates to avoid clearing the selection.
-     */
-    private void adjustSelectedCells(double delta) {
-        int modified = 0;
-        for (int r : grid.getSelectedRows()) {
-            int mr = grid.convertRowIndexToModel(r);
-            for (int c : grid.getSelectedColumns()) {
-                int mc = grid.convertColumnIndexToModel(c);
-                double raw = getRawValue(mr, mc);
-                if (Double.isNaN(raw)) continue;
-                double newPhys = table.toPhysical(raw) + delta;
-                setRawValue(mr, mc, table.toRaw(newPhys));
-                tableModel.fireTableCellUpdated(mr, mc);
-                modified++;
-            }
+    private boolean finishCellEditing() {
+        return !grid.isEditing() || grid.getCellEditor().stopCellEditing();
+    }
+
+    private boolean commitEdit(String description, Object mergeKey, Runnable operation) {
+        boolean changed = history.apply(description, mergeKey, operation);
+        if (changed) {
+            refreshDirtyState();
+            fireAndRestoreSelection();
         }
-        if (modified > 0) {
-            refreshHeatRange();
-            if (!loading) markDataDirty();
-            updateTableStats();
+        return changed;
+    }
+
+    private void performEdit(String description, Runnable operation) {
+        if (!finishCellEditing()) return;
+        try {
+            if (commitEdit(description, null, operation)) statusLabel.setText("Applied " + description + ".");
+        } catch (IllegalArgumentException ex) {
+            statusLabel.setText(ex.getMessage());
+        }
+    }
+
+    private int commitSelectedValue(double physical, int[] rows, int[] columns) {
+        double raw = table.getDataType().quantize(table.toRaw(physical));
+        int[] count = {0};
+        commitEdit("edit cells", null, () -> {
+            for (int row : rows) {
+                for (int col : columns) {
+                    if (tableModel.isCellEditable(row, col)
+                            && Double.compare(getRawValue(row, col), raw) != 0) {
+                        setRawValue(row, col, raw);
+                        count[0]++;
+                    }
+                }
+            }
+        });
+        return count[0];
+    }
+
+    private void adjustSelectedCells(double delta) {
+        for (int row : getSelectedEditableModelRows()) {
+            for (int col : getSelectedModelColumns()) {
+                double value = table.toRaw(table.toPhysical(getRawValue(row, col)) + delta);
+                setRawValue(row, col, table.getDataType().clampAndQuantize(value));
+            }
         }
     }
 
@@ -1046,22 +1060,21 @@ public class GhidraTablesEditorFrame extends JFrame {
         if (axis == null) {
             return;
         }
-        saveUndoState(undoDescription);
-
-        OperationStats stats = switch (axis) {
-            case ROWS -> rowOperation.get();
-            case COLUMNS -> columnOperation.get();
-            default -> new OperationStats();
-        };
-
-        if (!stats.changed()) {
-            return;
+        try {
+            OperationStats[] result = {new OperationStats()};
+            boolean changed = commitEdit(undoDescription, null, () -> result[0] = switch (axis) {
+                case ROWS -> rowOperation.get();
+                case COLUMNS -> columnOperation.get();
+                default -> new OperationStats();
+            });
+            if (changed) {
+                statusLabel.setText(String.format("%s %d span%s across %s.", pastTenseVerb,
+                        result[0].spans, result[0].spans == 1 ? "" : "s",
+                        axis == OperationAxis.ROWS ? "rows" : "columns"));
+            }
+        } catch (IllegalArgumentException ex) {
+            statusLabel.setText(ex.getMessage());
         }
-
-        fireAndRestoreSelection();
-        statusLabel.setText(String.format("%s %d span%s across %s.",
-                pastTenseVerb,
-                stats.spans, stats.spans == 1 ? "" : "s", axis == OperationAxis.ROWS ? "rows" : "columns"));
     }
 
     private OperationStats interpolateRows() {
@@ -1081,13 +1094,12 @@ public class GhidraTablesEditorFrame extends JFrame {
             }
             double physFirst = table.toPhysical(getRawValue(mr, cFirst));
             double physLast = table.toPhysical(getRawValue(mr, cLast));
-            for (int mc = cFirst; mc <= cLast; mc++) {
+            for (int mc : modelCols) {
                 if (!tableModel.isCellEditable(mr, mc)) {
                     continue;
                 }
                 double t = (cFirst == cLast) ? 0.0 : (double) (mc - cFirst) / (cLast - cFirst);
                 setRawValue(mr, mc, table.toRaw(physFirst + t * (physLast - physFirst)));
-                stats.cells++;
             }
             stats.spans++;
         }
@@ -1111,13 +1123,12 @@ public class GhidraTablesEditorFrame extends JFrame {
             }
             double physFirst = table.toPhysical(getRawValue(rFirst, mc));
             double physLast = table.toPhysical(getRawValue(rLast, mc));
-            for (int mr = rFirst; mr <= rLast; mr++) {
+            for (int mr : modelRows) {
                 if (!tableModel.isCellEditable(mr, mc)) {
                     continue;
                 }
                 double t = (rFirst == rLast) ? 0.0 : (double) (mr - rFirst) / (rLast - rFirst);
                 setRawValue(mr, mc, table.toRaw(physFirst + t * (physLast - physFirst)));
-                stats.cells++;
             }
             stats.spans++;
         }
@@ -1143,10 +1154,10 @@ public class GhidraTablesEditorFrame extends JFrame {
             for (int mc = cFirst; mc <= cLast; mc++) {
                 phys[mc - cFirst] = table.toPhysical(getRawValue(mr, mc));
             }
-            for (int mc = cFirst + 1; mc < cLast; mc++) {
+            for (int mc : modelCols) {
+                if (mc == cFirst || mc == cLast) continue;
                 double smoothed = (phys[mc - cFirst - 1] + phys[mc - cFirst] + phys[mc - cFirst + 1]) / 3.0;
                 setRawValue(mr, mc, table.toRaw(smoothed));
-                stats.cells++;
             }
             if (cLast - cFirst >= 2) {
                 stats.spans++;
@@ -1174,10 +1185,10 @@ public class GhidraTablesEditorFrame extends JFrame {
             for (int mr = rFirst; mr <= rLast; mr++) {
                 phys[mr - rFirst] = table.toPhysical(getRawValue(mr, mc));
             }
-            for (int mr = rFirst + 1; mr < rLast; mr++) {
+            for (int mr : modelRows) {
+                if (mr == rFirst || mr == rLast) continue;
                 double smoothed = (phys[mr - rFirst - 1] + phys[mr - rFirst] + phys[mr - rFirst + 1]) / 3.0;
                 setRawValue(mr, mc, table.toRaw(smoothed));
-                stats.cells++;
             }
             if (rLast - rFirst >= 2) {
                 stats.spans++;
@@ -1239,20 +1250,6 @@ public class GhidraTablesEditorFrame extends JFrame {
                 .sorted()
                 .distinct()
                 .toArray();
-    }
-
-    private int countEditableSelectedCells() {
-        int count = 0;
-        for (int row : grid.getSelectedRows()) {
-            int modelRow = grid.convertRowIndexToModel(row);
-            for (int col : grid.getSelectedColumns()) {
-                int modelCol = grid.convertColumnIndexToModel(col);
-                if (tableModel.isCellEditable(modelRow, modelCol)) {
-                    count++;
-                }
-            }
-        }
-        return count;
     }
 
     // =========================================================================
@@ -1509,9 +1506,17 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private void setView3D(boolean show3D) {
+        if (!finishCellEditing()) {
+            view3DToggle.setSelected(showing3D);
+            return;
+        }
         this.showing3D = show3D;
         if (viewCardLayout != null && viewCards != null) {
             if (show3D) {
+                if (surface3DPanel == null) {
+                    surface3DPanel = new Surface3DPanel();
+                    viewCards.add(surface3DPanel, CARD_3D);
+                }
                 surface3DPanel.refresh(table);
             }
             viewCardLayout.show(viewCards, show3D ? CARD_3D : CARD_GRID);
@@ -1522,38 +1527,26 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private void refreshHeatRange() {
-        double min, max;
-        if (table.is2D()) {
-            min = max = 0;
-            boolean first = true;
-            for (int r = 0; r < tableModel.getRowCount(); r++) {
-                for (int c = 0; c < tableModel.getColumnCount(); c++) {
-                    try {
-                        double v = Double.parseDouble(tableModel.getValueAt(r, c).toString());
-                        if (first) { min = max = v; first = false; }
-                        else { min = Math.min(min, v); max = Math.max(max, v); }
-                    } catch (Exception ignored) {}
-                }
+        DoubleSummaryStatistics stats = new DoubleSummaryStatistics();
+        if (table instanceof DensoTable2D t) {
+            for (double[] row : t.getValuesZ()) {
+                for (double value : row) stats.accept(table.toPhysical(value));
             }
         } else {
-            DoubleSummaryStatistics stats = Arrays.stream(((DensoTable1D) table).getValuesY())
-                    .map(table::toPhysical)
-                    .summaryStatistics();
-            min = stats.getMin();
-            max = stats.getMax();
+            for (double value : ((DensoTable1D) table).getValuesY()) {
+                stats.accept(table.toPhysical(value));
+            }
         }
-        renderer.setRange(min, max);
+        renderer.setRange(stats.getCount() == 0 ? 0 : stats.getMin(),
+                stats.getCount() == 0 ? 1 : stats.getMax());
         if (grid != null) grid.repaint();
     }
 
     private void refreshGridFromModel() {
-        boolean previousLoading = loading;
-        loading = true;
         tableModel.fireTableDataChanged();
         if (rowHeaderModel != null) {
             rowHeaderModel.fireTableDataChanged();
         }
-        loading = previousLoading;
         applyTableDensity();
         updateStatus();
     }
@@ -1586,29 +1579,31 @@ public class GhidraTablesEditorFrame extends JFrame {
      * Updates the model's MAC parameters without touching the raw data array.
      * Display refreshes to show the new physical interpretation of unchanged raw values.
      */
-    private void commitMacFields() {
+    private boolean commitMacFields() {
+        if (!table.isHasMAC() || multField == null) return true;
+        if (!finishCellEditing()) return false;
         try {
-            float newMult = Float.parseFloat(multField.getText().trim());
-            float newOff  = Float.parseFloat(offField.getText().trim());
-            String validationError = DensoTable.validateMacParameters(newMult, newOff);
-            if (validationError != null) {
-                statusLabel.setText(validationError);
-                multField.setForeground(GhidraTheme.errorForeground());
-                offField.setForeground(GhidraTheme.errorForeground());
-                return;
+            float multiplier = Float.parseFloat(multField.getText().trim());
+            float offset = Float.parseFloat(offField.getText().trim());
+            String error = DensoTable.validateMacParameters(multiplier, offset);
+            if (error != null) throw new IllegalArgumentException(error);
+            if (Float.compare(table.getMultiplier(), multiplier) == 0
+                    && Float.compare(table.getOffset(), offset) == 0) {
+                syncMacUi();
+                return true;
             }
-            table.setMultiplier(newMult);
-            table.setOffset(newOff);
-            macExprLabel.setText(table.getMacExpression());
-            multField.setForeground(GhidraTheme.textFieldForeground());
-            offField.setForeground(GhidraTheme.textFieldForeground());
-            refreshGridFromModel();
-            markMacDirty();
+            commitEdit("MAC parameters", null, () -> {
+                table.setMultiplier(multiplier);
+                table.setOffset(offset);
+            });
+            syncMacUi();
             statusLabel.setText("Updated MAC header fields. Raw table data is unchanged.");
-        } catch (NumberFormatException ex) {
-            statusLabel.setText("MAC fields must be numeric.");
+            return true;
+        } catch (IllegalArgumentException ex) {
+            statusLabel.setText(ex.getMessage());
             multField.setForeground(GhidraTheme.errorForeground());
             offField.setForeground(GhidraTheme.errorForeground());
+            return false;
         }
     }
 
@@ -1617,6 +1612,7 @@ public class GhidraTablesEditorFrame extends JFrame {
     // =========================================================================
 
     private void updateStatus() {
+        if (selectionSummaryLabel == null) return;
         int[] rows = grid.getSelectedRows();
         int[] cols = grid.getSelectedColumns();
 
@@ -1632,15 +1628,13 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         for (int r : rows) {
             for (int c : cols) {
-                Object val = tableModel.getValueAt(
-                        grid.convertRowIndexToModel(r),
-                        grid.convertColumnIndexToModel(c));
-                try {
-                    double v = Double.parseDouble(val.toString());
-                    count++; sum += v;
-                    minV = Math.min(minV, v); maxV = Math.max(maxV, v);
-                    lastVal = v;
-                } catch (Exception ignored) {}
+                int row = grid.convertRowIndexToModel(r);
+                int col = grid.convertColumnIndexToModel(c);
+                if (!tableModel.isCellEditable(row, col)) continue;
+                double value = table.toPhysical(getRawValue(row, col));
+                count++; sum += value;
+                minV = Math.min(minV, value); maxV = Math.max(maxV, value);
+                lastVal = value;
             }
         }
 
@@ -1672,53 +1666,27 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     // =========================================================================
-    // Undo support (single-level)
+    // Undo / redo
     // =========================================================================
 
-    private void saveUndoState(String description) {
-        undoDescription = description;
-        if (table.is2D()) {
-            DensoTable2D t2d = (DensoTable2D) table;
-            int cy = t2d.getCountY(), cx = t2d.getCountX();
-            undoValues2D = new double[cy][cx];
-            for (int y = 0; y < cy; y++) {
-                for (int x = 0; x < cx; x++) {
-                    undoValues2D[y][x] = t2d.getZ(y, x);
-                }
-            }
-        } else {
-            DensoTable1D t1d = (DensoTable1D) table;
-            undoValues1D = t1d.getValuesY().clone();
+    private void undoLastOperation() { moveHistory(false); }
+    private void redoLastOperation() { moveHistory(true); }
+
+    private void moveHistory(boolean redo) {
+        if (!finishCellEditing()) return;
+        String description = redo ? history.redo() : history.undo();
+        if (description == null) {
+            statusLabel.setText(redo ? "Nothing to redo." : "Nothing to undo.");
+            return;
         }
+        syncMacUi();
+        refreshDirtyState();
+        fireAndRestoreSelection();
+        statusLabel.setText((redo ? "Redid " : "Undid ") + description + ".");
     }
-
-    private void undoLastOperation() {
-        if (table.is2D() && undoValues2D != null) {
-            DensoTable2D t2d = (DensoTable2D) table;
-            for (int y = 0; y < undoValues2D.length; y++) {
-                for (int x = 0; x < undoValues2D[y].length; x++) {
-                    t2d.setZ(y, x, undoValues2D[y][x]);
-                }
-            }
-            undoValues2D = null;
-            fireAndRestoreSelection();
-            statusLabel.setText("Undid " + (undoDescription != null ? undoDescription : "last operation") + ".");
-        } else if (!table.is2D() && undoValues1D != null) {
-            DensoTable1D t1d = (DensoTable1D) table;
-            System.arraycopy(undoValues1D, 0, t1d.getValuesY(), 0, undoValues1D.length);
-            undoValues1D = null;
-            fireAndRestoreSelection();
-            statusLabel.setText("Undid " + (undoDescription != null ? undoDescription : "last operation") + ".");
-        } else {
-            statusLabel.setText("Nothing to undo.");
-        }
-    }
-
-    // =========================================================================
-    // Context menu operations
-    // =========================================================================
 
     private void copySelectedCells() {
+        if (!finishCellEditing()) return;
         int[] rows = grid.getSelectedRows();
         int[] cols = grid.getSelectedColumns();
         if (rows.length == 0 || cols.length == 0) return;
@@ -1726,10 +1694,10 @@ public class GhidraTablesEditorFrame extends JFrame {
         for (int r : rows) {
             for (int i = 0; i < cols.length; i++) {
                 if (i > 0) sb.append('\t');
-                Object val = tableModel.getValueAt(
-                        grid.convertRowIndexToModel(r),
-                        grid.convertColumnIndexToModel(cols[i]));
-                sb.append(val != null ? val : "");
+                int mr = grid.convertRowIndexToModel(r);
+                int mc = grid.convertColumnIndexToModel(cols[i]);
+                sb.append(!table.is2D() && mr == 0 ? table.getValuesX()[mc]
+                        : table.toPhysical(getRawValue(mr, mc)));
             }
             sb.append('\n');
         }
@@ -1739,115 +1707,90 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private void pasteIntoCells() {
+        if (!finishCellEditing()) return;
         try {
             String text = (String) Toolkit.getDefaultToolkit().getSystemClipboard()
                     .getData(DataFlavor.stringFlavor);
-            if (text == null || text.isEmpty()) return;
-            saveUndoState("paste");
-            String[] lines = text.split("\n");
-            int[] rows = grid.getSelectedRows();
-            int[] cols = grid.getSelectedColumns();
-            int pasted = 0;
-            for (int ri = 0; ri < Math.min(lines.length, rows.length); ri++) {
-                String[] vals = lines[ri].split("\t");
-                for (int ci = 0; ci < Math.min(vals.length, cols.length); ci++) {
-                    int mr = grid.convertRowIndexToModel(rows[ri]);
-                    int mc = grid.convertColumnIndexToModel(cols[ci]);
-                    if (tableModel.isCellEditable(mr, mc)) {
-                        try {
-                            Double.parseDouble(vals[ci].trim());
-                            tableModel.setValueAt(vals[ci].trim(), mr, mc);
-                            pasted++;
-                        } catch (NumberFormatException ignored) {}
-                    }
-                }
-            }
-            if (pasted > 0) {
-                refreshHeatRange();
-                if (!loading) markDataDirty();
-            }
-            statusLabel.setText("Pasted " + pasted + " cell(s).");
+            if (text == null || text.isBlank()) return;
+            pasteText(text);
         } catch (Exception ex) {
-            statusLabel.setText("Paste failed.");
+            statusLabel.setText("Paste failed: " + ex.getMessage());
         }
     }
 
+    private void pasteText(String text) {
+        int[] rows = grid.getSelectedRows();
+        int[] cols = grid.getSelectedColumns();
+        if (rows.length == 0 || cols.length == 0) return;
+        double[][] cells = TableClipboard.parse(text);
+        boolean single = cells.length == 1 && cells[0].length == 1;
+        boolean anchored = rows.length == 1 && cols.length == 1;
+        if (!single && !anchored && (rows.length != cells.length || cols.length != cells[0].length)) {
+            throw new IllegalArgumentException("Select one anchor cell or a region matching the clipboard.");
+        }
+        int height = single ? rows.length : cells.length;
+        int width = single ? cols.length : cells[0].length;
+        if (anchored && (rows[0] + height > grid.getRowCount()
+                || cols[0] + width > grid.getColumnCount())) {
+            throw new IllegalArgumentException("Clipboard extends beyond the table.");
+        }
+        commitEdit("paste", null, () -> {
+            for (int r = 0; r < height; r++) {
+                for (int c = 0; c < width; c++) {
+                    int mr = grid.convertRowIndexToModel(anchored ? rows[0] + r : rows[r]);
+                    int mc = grid.convertColumnIndexToModel(anchored ? cols[0] + c : cols[c]);
+                    if (!tableModel.isCellEditable(mr, mc)) {
+                        throw new IllegalArgumentException("Paste includes read-only axis cells.");
+                    }
+                    double physical = cells[single ? 0 : r][single ? 0 : c];
+                    setRawValue(mr, mc, table.toRaw(physical));
+                }
+            }
+        });
+        statusLabel.setText("Pasted " + height * width + " cells.");
+    }
+
     private void setValueDialog() {
-        String input = JOptionPane.showInputDialog(this, "Set all selected cells to:", "Set Value", JOptionPane.PLAIN_MESSAGE);
+        if (!finishCellEditing()) return;
+        String input = JOptionPane.showInputDialog(this, "Set all selected cells to:",
+                "Set Value", JOptionPane.PLAIN_MESSAGE);
         if (input == null) return;
         try {
-            double val = Double.parseDouble(input.trim());
-            saveUndoState("set-value");
-            fillSelectedCells(val);
+            fillSelectedCells(Double.parseDouble(input.trim()));
         } catch (NumberFormatException ex) {
             statusLabel.setText("Invalid number.");
         }
     }
 
     private void fillSelectedCells(double physicalValue) {
-        int modified = 0;
-        for (int r : grid.getSelectedRows()) {
-            int mr = grid.convertRowIndexToModel(r);
-            for (int c : grid.getSelectedColumns()) {
-                int mc = grid.convertColumnIndexToModel(c);
-                if (tableModel.isCellEditable(mr, mc)) {
-                    setRawValue(mr, mc, table.toRaw(physicalValue));
-                    modified++;
-                }
+        performEdit("set value", () -> {
+            double raw = table.getDataType().quantize(table.toRaw(physicalValue));
+            for (int row : getSelectedEditableModelRows()) {
+                for (int col : getSelectedModelColumns()) setRawValue(row, col, raw);
             }
-        }
-        if (modified > 0) {
-            fireAndRestoreSelection();
-            statusLabel.setText("Set " + modified + " cell(s) to " + physicalValue + ".");
-        }
+        });
     }
 
     private void fillRight() {
-        int[] rows = grid.getSelectedRows();
-        int[] cols = grid.getSelectedColumns();
-        if (cols.length < 2) return;
-        int modified = 0;
-        for (int r : rows) {
-            int mr = grid.convertRowIndexToModel(r);
-            int srcMc = grid.convertColumnIndexToModel(cols[0]);
-            double raw = getRawValue(mr, srcMc);
-            if (Double.isNaN(raw)) continue;
-            for (int ci = 1; ci < cols.length; ci++) {
-                int mc = grid.convertColumnIndexToModel(cols[ci]);
-                if (tableModel.isCellEditable(mr, mc)) {
-                    setRawValue(mr, mc, raw);
-                    modified++;
-                }
+        performEdit("fill right", () -> {
+            int[] cols = getSelectedModelColumns();
+            if (cols.length < 2) return;
+            for (int row : getSelectedEditableModelRows()) {
+                double raw = getRawValue(row, cols[0]);
+                for (int col : cols) setRawValue(row, col, raw);
             }
-        }
-        if (modified > 0) {
-            fireAndRestoreSelection();
-            statusLabel.setText("Filled right: " + modified + " cell(s).");
-        }
+        });
     }
 
     private void fillDown() {
-        int[] rows = grid.getSelectedRows();
-        int[] cols = grid.getSelectedColumns();
-        if (rows.length < 2) return;
-        int modified = 0;
-        int srcRow = grid.convertRowIndexToModel(rows[0]);
-        for (int c : cols) {
-            int mc = grid.convertColumnIndexToModel(c);
-            double raw = getRawValue(srcRow, mc);
-            if (Double.isNaN(raw)) continue;
-            for (int ri = 1; ri < rows.length; ri++) {
-                int mr = grid.convertRowIndexToModel(rows[ri]);
-                if (tableModel.isCellEditable(mr, mc)) {
-                    setRawValue(mr, mc, raw);
-                    modified++;
-                }
+        performEdit("fill down", () -> {
+            int[] rows = getSelectedEditableModelRows();
+            if (rows.length < 2) return;
+            for (int col : getSelectedModelColumns()) {
+                double raw = getRawValue(rows[0], col);
+                for (int row : rows) setRawValue(row, col, raw);
             }
-        }
-        if (modified > 0) {
-            fireAndRestoreSelection();
-            statusLabel.setText("Filled down: " + modified + " cell(s).");
-        }
+        });
     }
 
     // =========================================================================
@@ -1873,153 +1816,41 @@ public class GhidraTablesEditorFrame extends JFrame {
     }
 
     private void applyChanges() {
-        if (program == null) {
-            Msg.showWarn(this, this, "No Program", "No program is currently loaded.");
-            return;
-        }
-        if (!dirty) return;
-        if (grid.isEditing() && !grid.getCellEditor().stopCellEditing()) {
-            statusLabel.setText("Finish editing the current cell before saving.");
-            return;
-        }
-        if (table.isHasMAC()) {
-            String validationError = DensoTable.validateMacParameters(
-                    table.getMultiplier(), table.getOffset());
-            if (validationError != null) {
-                Msg.showWarn(this, this, "Invalid MAC", validationError);
-                return;
-            }
-        }
-
+        if (program == null || program.isClosed()) return;
+        if (!finishCellEditing() || !commitMacFields() || !dirty) return;
         int tx = program.startTransaction("Edit Denso Table: " + table.getName());
         boolean success = false;
+        Exception failure = null;
         try {
-            boolean wroteData = dataDirty;
-            boolean wroteMacHeader = macDirty && table.isHasMAC();
-            Memory mem = program.getMemory();
-            if (wroteData) {
-                if (table.is2D()) write2D((DensoTable2D) table, mem);
-                else              write1D((DensoTable1D) table, mem);
-            }
-            if (wroteMacHeader) {
-                writeMacHeader(table, mem);
-            }
+            DensoTableIO.write(program, table, dataDirty, macDirty);
             success = true;
-            clearDirtyState();
-            if (wroteData && wroteMacHeader) {
-                statusLabel.setText("Saved table data and MAC header to ROM.");
-            }
-            else if (wroteData) {
-                statusLabel.setText("Saved table data to ROM.");
-            }
-            else if (wroteMacHeader) {
-                statusLabel.setText("Saved MAC header to ROM. Raw table data is unchanged.");
-            }
-            else {
-                statusLabel.setText("No ROM changes were pending.");
-            }
         } catch (Exception ex) {
-            Msg.showError(this, this, "Write Error",
-                    "Failed to write table: " + ex.getMessage(), ex);
+            failure = ex;
         } finally {
             program.endTransaction(tx, success);
         }
-    }
-
-    private void write2D(DensoTable2D t2d, Memory mem) throws Exception {
-        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
-        int countX = t2d.getCountX();
-        int countY = t2d.getCountY();
-        byte[] raw = encodeDataBuffer(t2d.getDataType(), countX * countY,
-                index -> t2d.getZ(index / countX, index % countX),
-                index -> "Invalid value at row " + (index / countX + 1) +
-                        ", column " + (index % countX + 1) + ": ");
-        mem.setBytes(space.getAddress(t2d.getPtrZ()), raw);
-    }
-
-    private void write1D(DensoTable1D t1d, Memory mem) throws Exception {
-        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
-        byte[] raw = encodeDataBuffer(t1d.getDataType(), t1d.getCountX(),
-                index -> t1d.getValuesY()[index],
-                index -> "Invalid value at column " + (index + 1) + ": ");
-        mem.setBytes(space.getAddress(t1d.getPtrY()), raw);
-    }
-
-    private byte[] encodeDataBuffer(DensoTableType dataType, int valueCount,
-            IntToDoubleFunction valueProvider, IntFunction<String> errorPrefixProvider)
-            throws Exception {
-        int elemSize = dataType.getValueSize();
-        byte[] raw = new byte[valueCount * elemSize];
-        for (int index = 0; index < valueCount; index++) {
-            long bits;
-            try {
-                bits = dataType.doubleToRaw(valueProvider.applyAsDouble(index));
-            }
-            catch (IllegalArgumentException ex) {
-                throw new IllegalArgumentException(
-                        errorPrefixProvider.apply(index) + ex.getMessage(), ex);
-            }
-            writeBigEndian(raw, index * elemSize, bits, elemSize);
+        if (!success) {
+            Msg.showError(this, this, "Write Error", "Table changes were rolled back: "
+                    + failure.getMessage(), failure);
+            return;
         }
-        return raw;
-    }
-
-    private void writeMacHeader(DensoTable t, Memory mem) throws Exception {
-        String validationError = DensoTable.validateMacParameters(
-                t.getMultiplier(), t.getOffset());
-        if (validationError != null) {
-            throw new IllegalArgumentException(validationError);
-        }
-        AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
-        long macAddr = t.getHeaderAddress() + (t.is2D() ? 20 : 12);
-        byte[] buf = new byte[8];
-        writeBigEndian(buf, 0, Float.floatToIntBits(t.getMultiplier()) & 0xFFFFFFFFL, 4);
-        writeBigEndian(buf, 4, Float.floatToIntBits(t.getOffset())     & 0xFFFFFFFFL, 4);
-        mem.setBytes(space.getAddress(macAddr), buf);
-    }
-
-    // =========================================================================
-    // ROM read helpers
-    // =========================================================================
-
-    /**
-     * Reads MAC header bytes and data array fresh from ROM into the model.
-     * Called at construction and on revert so the display is never stale.
-     */
-    private void loadFromRom() {
-        if (program == null) return;
+        // Edits are already quantized. Reload also refreshes axes changed in the listing.
         try {
-            Memory mem = program.getMemory();
-            AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
-
-            // Re-read MAC from header bytes
-            if (table.isHasMAC()) {
-                long macAddr = table.getHeaderAddress() + (table.is2D() ? 20 : 12);
-                byte[] buf = new byte[8];
-                mem.getBytes(space.getAddress(macAddr), buf);
-                table.setMultiplier(readFloatBE(buf, 0));
-                table.setOffset(readFloatBE(buf, 4));
-            }
-
-            // Re-read data array
-            if (table.is2D()) {
-                DensoTable2D t2d = (DensoTable2D) table;
-                DensoTableType dtype = t2d.getDataType();
-                int cx = t2d.getCountX();
-                int cy = t2d.getCountY();
-                t2d.setValuesX(readFloatArray(mem, space, t2d.getPtrX(), cx));
-                t2d.setValuesY(readFloatArray(mem, space, t2d.getPtrY(), cy));
-                t2d.setValuesZ(readDataMatrix(mem, space, t2d.getPtrZ(), cx, cy, dtype));
-            } else {
-                DensoTable1D t1d = (DensoTable1D) table;
-                DensoTableType dtype = t1d.getDataType();
-                int count = t1d.getCountX();
-                t1d.setValuesX(readFloatArray(mem, space, t1d.getPtrX(), count));
-                t1d.setValuesY(readDataArray(mem, space, t1d.getPtrY(), count, dtype));
-            }
+            DensoTableIO.reload(program, table);
         } catch (Exception ex) {
-            Msg.warn(this, "ROM read failed: " + ex.getMessage());
+            statusLabel.setText("Saved, but ROM reload failed: " + ex.getMessage());
+            Msg.warn(this, "Saved table could not be reloaded", ex);
+            history.markSaved();
+            refreshDirtyState();
+            savedListener.run();
+            return;
         }
+        history.markSaved();
+        syncMacUi();
+        refreshDirtyState();
+        refreshGridFromModel();
+        savedListener.run();
+        statusLabel.setText("Saved table changes to ROM.");
     }
 
     /** Updates the MAC UI fields to match the current model values. */
@@ -2030,137 +1861,106 @@ public class GhidraTablesEditorFrame extends JFrame {
         multField.setForeground(GhidraTheme.textFieldForeground());
         offField.setForeground(GhidraTheme.textFieldForeground());
         macExprLabel.setText(table.getMacExpression());
-    }
-
-    private static float readFloatBE(byte[] b, int off) {
-        return Float.intBitsToFloat((int) readBigEndian(b, off, 4));
-    }
-
-    private float[] readFloatArray(Memory mem, AddressSpace space, long ptr, int count)
-            throws Exception {
-        byte[] raw = new byte[count * 4];
-        mem.getBytes(space.getAddress(ptr), raw);
-        float[] values = new float[count];
-        for (int i = 0; i < count; i++) {
-            values[i] = readFloatBE(raw, i * 4);
-        }
-        return values;
-    }
-
-    private double[] readDataArray(Memory mem, AddressSpace space, long ptr,
-            int count, DensoTableType dataType) throws Exception {
-        int elemSize = dataType.getValueSize();
-        byte[] raw = new byte[count * elemSize];
-        mem.getBytes(space.getAddress(ptr), raw);
-        double[] values = new double[count];
-        for (int i = 0; i < count; i++) {
-            values[i] = dataType.rawToDouble(readBigEndian(raw, i * elemSize, elemSize));
-        }
-        return values;
-    }
-
-    private double[][] readDataMatrix(Memory mem, AddressSpace space, long ptr,
-            int countX, int countY, DensoTableType dataType) throws Exception {
-        int elemSize = dataType.getValueSize();
-        byte[] raw = new byte[countX * countY * elemSize];
-        mem.getBytes(space.getAddress(ptr), raw);
-        double[][] values = new double[countY][countX];
-        for (int row = 0; row < countY; row++) {
-            for (int col = 0; col < countX; col++) {
-                values[row][col] = dataType.rawToDouble(
-                        readBigEndian(raw, (row * countX + col) * elemSize, elemSize));
-            }
-        }
-        return values;
-    }
-
-    private static long readBigEndian(byte[] buf, int off, int size) {
-        long v = 0;
-        for (int i = 0; i < size; i++) v = (v << 8) | (buf[off + i] & 0xFFL);
-        return v;
-    }
-
-    private static void writeBigEndian(byte[] buf, int off, long value, int size) {
-        for (int i = size - 1; i >= 0; i--) {
-            buf[off + i] = (byte) (value & 0xFF);
-            value >>= 8;
-        }
+        refreshDirtyState();
     }
 
     private void revertChanges() {
-        if (!dirty) return;
-        if (grid.isEditing()) {
-            grid.getCellEditor().cancelCellEditing();
-        }
+        if (program == null || program.isClosed() || !hasUnsavedChanges()) return;
         int choice = JOptionPane.showConfirmDialog(this,
                 "Discard all unsaved changes?", "Revert",
                 JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (choice != JOptionPane.YES_OPTION) return;
 
-        loadFromRom();
+        try {
+            DensoTableIO.reload(program, table);
+        } catch (Exception ex) {
+            statusLabel.setText("Revert failed; edits retained: " + ex.getMessage());
+            return;
+        }
+        if (grid.isEditing()) grid.getCellEditor().cancelCellEditing();
+        history.reset();
         syncMacUi();
-        clearDirtyState();
+        refreshDirtyState();
         refreshGridFromModel();
         statusLabel.setText("Reverted from ROM.");
     }
 
     private void exportCsv() {
+        if (!finishCellEditing() || !commitMacFields()) return;
         JFileChooser fc = new JFileChooser();
         fc.setSelectedFile(new File(table.getName() + ".csv"));
         if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        try (PrintWriter pw = new PrintWriter(new FileWriter(fc.getSelectedFile()))) {
-            int rows = tableModel.getRowCount(), cols = tableModel.getColumnCount();
-            for (int r = 0; r < rows; r++) {
-                StringBuilder sb = new StringBuilder();
-                for (int c = 0; c < cols; c++) {
-                    if (c > 0) sb.append(',');
-                    Object v = tableModel.getValueAt(r, c);
-                    sb.append(v != null ? v : "");
+        if (fc.getSelectedFile().exists() && JOptionPane.showConfirmDialog(this,
+                "Replace " + fc.getSelectedFile().getName() + "?", "Export CSV",
+                JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
+        try (PrintWriter pw = new PrintWriter(fc.getSelectedFile(), java.nio.charset.StandardCharsets.UTF_8)) {
+            if (table instanceof DensoTable2D t) {
+                pw.print("Y/X");
+                for (float x : t.getValuesX()) pw.print("," + Float.toString(x));
+                pw.println();
+                for (int r = 0; r < t.getCountY(); r++) {
+                    pw.print(Float.toString(t.getValuesY()[r]));
+                    for (double value : t.getValuesZ()[r]) pw.print("," + table.toPhysical(value));
+                    pw.println();
                 }
-                pw.println(sb);
+            } else {
+                pw.print("X");
+                for (float x : table.getValuesX()) pw.print("," + Float.toString(x));
+                pw.println();
+                pw.print("Value");
+                for (double value : ((DensoTable1D) table).getValuesY()) pw.print("," + table.toPhysical(value));
+                pw.println();
             }
+            if (pw.checkError()) throw new IOException("Could not write the complete CSV file.");
             statusLabel.setText("Exported → " + fc.getSelectedFile().getName());
         } catch (IOException ex) {
             Msg.showError(this, this, "Export Error", ex.getMessage(), ex);
         }
     }
 
+    public Program getProgram() { return program; }
+    public long getHeaderAddress() { return table.getHeaderAddress(); }
+    public DensoTable getTableSnapshot() { return table.copy(); }
+    public void setSavedListener(Runnable listener) { savedListener = listener; }
+
+    public boolean hasUnsavedChanges() {
+        return dirty || (grid.isEditing() && editor.hasPendingEdit())
+                || (table.isHasMAC() && multField != null
+                    && (!multField.getText().trim().equals(Float.toString(table.getMultiplier()))
+                        || !offField.getText().trim().equals(Float.toString(table.getOffset()))));
+    }
+
     private void handleClose() {
-        if (dirty) {
-            int choice = JOptionPane.showConfirmDialog(this,
-                    "You have unsaved changes.  Close anyway?", "Unsaved Changes",
-                    JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-            if (choice != JOptionPane.YES_OPTION) return;
-        }
-        if (surface3DPanel != null) {
-            surface3DPanel.dispose();
-        }
+        if (hasUnsavedChanges() && JOptionPane.showConfirmDialog(this,
+                "You have unsaved changes. Close anyway?", "Unsaved Changes",
+                JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE) != JOptionPane.YES_OPTION) return;
         dispose();
     }
 
-    private void markDataDirty() {
-        dataDirty = true;
-        dirty = true;
-        saveBtn.setEnabled(program != null);
-        revertBtn.setEnabled(true);
-        setTitle(table.getName() + " - GhidraTables [modified]");
+    @Override
+    public void dispose() {
+        if (surface3DPanel != null) surface3DPanel.dispose();
+        super.dispose();
     }
 
-    private void markMacDirty() {
-        macDirty = true;
-        dirty = true;
-        saveBtn.setEnabled(program != null);
-        revertBtn.setEnabled(true);
-        setTitle(table.getName() + " - GhidraTables [modified]");
+    private void refreshDirtyState() {
+        dataDirty = history.isDataDirty();
+        macDirty = history.isMacDirty();
+        dirty = dataDirty || macDirty;
+        boolean pending = hasUnsavedChanges();
+        saveBtn.setEnabled(pending && program != null && !program.isClosed());
+        revertBtn.setEnabled(pending);
+        setTitle(table.getName() + " - GhidraTables" + (dirty ? " [modified]" : ""));
     }
 
-    private void clearDirtyState() {
-        dirty = false;
-        dataDirty = false;
-        macDirty = false;
-        saveBtn.setEnabled(false);
-        revertBtn.setEnabled(false);
-        setTitle(table.getName() + " - GhidraTables");
+    private void setCellValue(Object value, int row, int col) {
+        if (value == null || !tableModel.isCellEditable(row, col)
+                || value.toString().trim().equals(tableModel.getValueAt(row, col))) return;
+        try {
+            commitSelectedValue(Double.parseDouble(value.toString().trim()), new int[] {row}, new int[] {col});
+        } catch (IllegalArgumentException ex) {
+            statusLabel.setText(ex.getMessage());
+        }
     }
 
     // =========================================================================
@@ -2181,12 +1981,8 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         @Override public boolean isCellEditable(int row, int col) { return true; }
 
-        @Override public void setValueAt(Object aValue, int row, int col) {
-            try {
-                double physical = Double.parseDouble(aValue.toString().trim());
-                t2d.setZ(row, col, t2d.toRaw(physical));
-                fireTableCellUpdated(row, col);
-            } catch (NumberFormatException ignored) {}
+        @Override public void setValueAt(Object value, int row, int col) {
+            setCellValue(value, row, col);
         }
     }
 
@@ -2205,13 +2001,8 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         @Override public boolean isCellEditable(int row, int col) { return row == 1; }
 
-        @Override public void setValueAt(Object aValue, int row, int col) {
-            if (row != 1) return;
-            try {
-                double physical = Double.parseDouble(aValue.toString().trim());
-                t1d.getValuesY()[col] = t1d.toRaw(physical);
-                fireTableCellUpdated(row, col);
-            } catch (NumberFormatException ignored) {}
+        @Override public void setValueAt(Object value, int row, int col) {
+            setCellValue(value, row, col);
         }
     }
 

@@ -105,8 +105,7 @@ public class DensoTable2D extends DensoTable {
     }
 
     /**
-     * Returns the global minimum physical value across all Z cells,
-     * useful for heat-map normalisation.
+     * Returns the global minimum raw value across all Z cells.
      */
     public double getMinZ() {
         double min = Double.MAX_VALUE;
@@ -119,8 +118,7 @@ public class DensoTable2D extends DensoTable {
     }
 
     /**
-     * Returns the global maximum physical value across all Z cells,
-     * useful for heat-map normalisation.
+     * Returns the global maximum raw value across all Z cells.
      */
     public double getMaxZ() {
         double max = -Double.MAX_VALUE;
