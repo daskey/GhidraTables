@@ -45,6 +45,8 @@ test {
 	testLogging {
 		exceptionFormat = 'full'
 	}
+	// Scanner tests build real in-memory Ghidra programs and need the install.
+	systemProperty 'ghidra.install.dir', new File(ghidraInstallDir).getCanonicalPath()
 }
 
 buildExtension.configure {

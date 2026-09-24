@@ -9,6 +9,7 @@ import java.util.List;
 
 import denso.table.editor.model.*;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.*;
@@ -20,13 +21,27 @@ import ghidra.util.task.TaskMonitor;
  * calibration table headers.
  *
  * <h3>Detection strategy</h3>
+ * Record and axis validation follows ScoobyRom
+ * (<a href="https://github.com/aalesv/ScoobyRom">github.com/aalesv/ScoobyRom</a>),
+ * where its "2D"/"3D" tables are this extension's 1-D/2-D tables:
  * <ol>
- *   <li>Walk every initialised {@link MemoryBlock} at 4-byte aligned offsets.</li>
- *   <li>At each position attempt to parse a 2-D header first (stricter
- *       validation), then a 1-D header.</li>
- *   <li>Validate that CountX/CountY are in a plausible range and that
- *       pointer values fall inside the loaded memory.</li>
- *   <li>Read axis and data arrays; reject the candidate if any read fails.</li>
+ *   <li>Walk every initialised block in the default address space at 4-byte
+ *       aligned offsets, trying a 2-D record first, then a 1-D record.</li>
+ *   <li>Axis counts must be 2..255 and the type field a known type code with
+ *       its unused bytes zero.</li>
+ *   <li>Pointers must lie at least 8 KiB into the ROM, inside initialised
+ *       memory, differ from each other, and the axis/data ranges must not
+ *       overlap (data is sized as 1 byte per value for this check, since the
+ *       declared type can be wrong).</li>
+ *   <li>Axis arrays must be non-decreasing and every value must be 0 or have a
+ *       magnitude in [1e-12, 1e12].</li>
+ *   <li>A MAC pair is present when the multiplier is non-zero and both floats
+ *       pass the same value check.</li>
+ *   <li>Table data never causes a record to be rejected. Only the data type is
+ *       refined: records that declare float data without a MAC are checked for
+ *       a packed 8/16-bit payload using neighbouring records, and otherwise read
+ *       as UInt16 when the payload is not valid floats. Such types are flagged
+ *       as inferred.</li>
  * </ol>
  *
  * <h3>Endianness</h3>
@@ -38,12 +53,17 @@ public final class DensoTableScanner {
 
     // ------- tunable constants -----------------------------------------------
 
-    /** Minimum plausible axis entry count. Some valid calibrations are scalar 1x1 maps. */
-    private static final int MIN_COUNT = 1;
-    /** Maximum plausible axis entry count (anything larger is almost certainly garbage). */
-    private static final int MAX_COUNT = 250;
+    /** Minimum axis entry count (ScoobyRom: counts below 2 do not make sense). */
+    static final int MIN_COUNT = 2;
+    /** Maximum axis entry count. */
+    static final int MAX_COUNT = 255;
 
-    private static final int MIN_POINTER_DISTANCE = 0x100;
+    /**
+     * Pointers into the first 8 KiB of the ROM are rejected: that area holds
+     * vectors and low-level code, not maps (ScoobyRom's {@code PosMin}).
+     */
+    static final int MIN_POINTER_OFFSET = 8 * 1024;
+
     private static final int[] AMBIGUOUS_1D_NEIGHBOR_OFFSETS = { -20, -12, 12, 20 };
     private static final int LOCAL_DESCRIPTOR_SCAN_BYTES = 0x100;
     /** How often (in bytes) progress is reported while walking a block. */
@@ -53,38 +73,28 @@ public final class DensoTableScanner {
 
     private DensoTableScanner() {}
 
-    private static final class OneDHeaderPattern {
-        final int count;
-        final int typeCode;
-        final long ptrX;
-        final long ptrY;
+    /** Memory views shared by every parse in one scan. */
+    private record ScanContext(Memory memory, AddressSpace space,
+            AddressSetView initialized, long minPointer) {
 
-        OneDHeaderPattern(int count, int typeCode, long ptrX, long ptrY) {
-            this.count = count;
-            this.typeCode = typeCode;
-            this.ptrX = ptrX;
-            this.ptrY = ptrY;
+        /** True when {@code [ptr, ptr + length)} is initialised memory at or above the minimum. */
+        boolean isReadable(long ptr, long length) {
+            if (ptr < minPointer || length <= 0) return false;
+            try {
+                Address start = space.getAddress(ptr);
+                Address end = space.getAddress(ptr + length - 1);
+                return initialized.contains(start, end);
+            }
+            catch (Exception e) {
+                return false;
+            }
         }
     }
 
-    private static final class TwoDHeaderPattern {
-        final int countX;
-        final int countY;
-        final int typeCode;
-        final long ptrX;
-        final long ptrY;
-        final long ptrZ;
+    private record OneDHeaderPattern(int count, int typeCode, long ptrX, long ptrY) {}
 
-        TwoDHeaderPattern(int countX, int countY, int typeCode,
-                long ptrX, long ptrY, long ptrZ) {
-            this.countX = countX;
-            this.countY = countY;
-            this.typeCode = typeCode;
-            this.ptrX = ptrX;
-            this.ptrY = ptrY;
-            this.ptrZ = ptrZ;
-        }
-    }
+    private record TwoDHeaderPattern(int countX, int countY, int typeCode,
+            long ptrX, long ptrY, long ptrZ) {}
 
     // =========================================================================
     // Public API
@@ -107,11 +117,21 @@ public final class DensoTableScanner {
 
         MemoryBlock[] blocks = memory.getBlocks();
 
-        // Compute total size for progress reporting
+        // Compute total size for progress reporting, and the lowest ROM address
         long totalBytes = 0;
+        long romStart = Long.MAX_VALUE;
         for (MemoryBlock b : blocks) {
-            if (isScannable(b, space)) totalBytes += b.getSize();
+            if (isScannable(b, space)) {
+                totalBytes += b.getSize();
+                romStart = Math.min(romStart, b.getStart().getOffset());
+            }
         }
+        if (romStart == Long.MAX_VALUE) {
+            return results;
+        }
+        ScanContext ctx = new ScanContext(memory, space,
+                memory.getAllInitializedAddressSet(), romStart + MIN_POINTER_OFFSET);
+
         monitor.initialize(totalBytes);
         monitor.setMessage("Scanning for Denso tables…");
 
@@ -151,7 +171,7 @@ public final class DensoTableScanner {
 
                 // ── Try 2-D first (needs at least 20 bytes for no-MAC, 28 for MAC) ──
                 if (i + 20 <= blockSize) {
-                    DensoTable2D t2 = tryParse2D(buf, i, blockStartOff, memory, space);
+                    DensoTable2D t2 = tryParse2D(buf, i, blockStartOff, ctx);
                     if (t2 != null) {
                         results.add(t2);
                         // Skip past the header so we don't double-detect
@@ -161,12 +181,10 @@ public final class DensoTableScanner {
                 }
 
                 // ── Then try 1-D ─────────────────────────────────────────────────
-                if (i + 12 <= blockSize) {
-                    DensoTable1D t1 = tryParse1D(buf, i, blockStartOff, memory, space);
-                    if (t1 != null) {
-                        results.add(t1);
-                        i += (t1.isHasMAC() ? 20 : 12) - 4;
-                    }
+                DensoTable1D t1 = tryParse1D(buf, i, blockStartOff, ctx);
+                if (t1 != null) {
+                    results.add(t1);
+                    i += (t1.isHasMAC() ? 20 : 12) - 4;
                 }
             }
 
@@ -203,31 +221,18 @@ public final class DensoTableScanner {
     }
 
     // =========================================================================
-    // Private parsing helpers
+    // Record parsing
     // =========================================================================
 
-    /** Attempts to parse a 2-D table header at {@code buf[offset]}. */
-    private static DensoTable2D tryParse2D(byte[] buf, int off,
-            long blockStartOff, Memory memory, AddressSpace space) {
+    /** Attempts to parse a 2-D table header at {@code buf[off]}. */
+    private static DensoTable2D tryParse2D(byte[] buf, int off, long blockStartOff,
+            ScanContext ctx) {
 
-        int countX = readInt16BE(buf, off);
-        int countY = readInt16BE(buf, off + 2);
-        if (!isValidCount(countX) || !isValidCount(countY)) return null;
+        TwoDHeaderPattern hdr = read2DHeaderPattern(buf, off, ctx);
+        if (hdr == null) return null;
 
-        long ptrX = readInt32BE(buf, off + 4);
-        long ptrY = readInt32BE(buf, off + 8);
-        long ptrZ = readInt32BE(buf, off + 12);
-        int  typeCode = buf[off + 16] & 0xFF;  // little-endian: first byte only
-
-        // Remaining 3 bytes of the type field must be zero
-        if ((buf[off + 17] | buf[off + 18] | buf[off + 19]) != 0) return null;
-
-        if (!DensoTableType.fromCode(typeCode).isValid()) return null;
-
-        long headerAddr = blockStartOff + off;
-        if (!isValidPointer(ptrX, headerAddr, memory, space)) return null;
-        if (!isValidPointer(ptrY, headerAddr, memory, space)) return null;
-        if (!isValidPointer(ptrZ, headerAddr, memory, space)) return null;
+        int countX = hdr.countX();
+        int countY = hdr.countY();
 
         // Optional MAC
         boolean hasMAC = false;
@@ -235,46 +240,44 @@ public final class DensoTableScanner {
         if (off + 28 <= buf.length) {
             float m = readFloatBE(buf, off + 20);
             float o = readFloatBE(buf, off + 24);
-            if (isPlausibleMultiplier(m) && Float.isFinite(o)) {
+            if (DensoTable.validateMacParameters(m, o) == null) {
                 hasMAC = true;
                 multiplier = m;
                 macOffset = o;
             }
         }
 
-        // Read axis arrays — both must be finite and ordered
-        float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
-        if (valuesX == null || !isMonotonicFinite(valuesX)) return null;
+        float[] valuesX = readFloatArrayFromMemory(ctx, hdr.ptrX(), countX);
+        float[] valuesY = readFloatArrayFromMemory(ctx, hdr.ptrY(), countY);
+        if (valuesX == null || valuesY == null) return null;
 
-        float[] valuesY = readFloatArrayFromMemory(memory, space, ptrY, countY);
-        if (valuesY == null || !isMonotonicFinite(valuesY)) return null;
-
-        DensoTableType dtype = resolve2DDataType(buf, off, blockStartOff,
-                countX, countY, typeCode, ptrX, ptrY, ptrZ, hasMAC, memory, space);
-        if (dtype == null) return null;
-
-        double[][] valuesZ = readDataMatrix(memory, space, ptrZ, countX, countY, dtype);
-        if (valuesZ == null) return null;
-
-        // For float data, raw Z values must be finite and within calibration range
-        if (dtype == DensoTableType.FLOAT) {
-            for (double[] row : valuesZ) {
-                for (double v : row) {
-                    if (!isPlausibleCalibrationFloat(v)) return null;
-                }
+        DensoTableType declared = DensoTableType.fromCode(hdr.typeCode());
+        DensoTableType dtype = declared;
+        if (!hasMAC && declared == DensoTableType.FLOAT) {
+            DensoTableType packed = inferPacked2DDataType(buf, off, blockStartOff,
+                    hdr.ptrZ(), countX, countY, ctx);
+            if (packed != null) {
+                dtype = packed;
+            }
+            else if (!hasValidFloatPayload(ctx, hdr.ptrZ(), countX * countY)) {
+                // ScoobyRom: float without MAC whose values aren't valid floats is UInt16
+                dtype = DensoTableType.UINT16;
             }
         }
 
-        // Z data is stored as raw values; the editor applies the MAC when displaying.
+        double[][] valuesZ = readDataMatrix(ctx, hdr.ptrZ(), countX, countY, dtype);
+        if (valuesZ == null) return null;
 
+        long headerAddr = blockStartOff + off;
         DensoTable2D t = new DensoTable2D();
         t.setHeaderAddress(headerAddr);
-        t.setPtrX(ptrX);
-        t.setPtrY(ptrY);
-        t.setPtrZ(ptrZ);
+        t.setPtrX(hdr.ptrX());
+        t.setPtrY(hdr.ptrY());
+        t.setPtrZ(hdr.ptrZ());
         t.setCountX(countX);
         t.setCountY(countY);
         t.setDataType(dtype);
+        t.setTypeInferred(dtype != declared);
         t.setHasMAC(hasMAC);
         t.setMultiplier(multiplier);
         t.setOffset(macOffset);
@@ -285,31 +288,169 @@ public final class DensoTableScanner {
         return t;
     }
 
-    private static DensoTableType resolve2DDataType(byte[] buf, int off,
-            long blockStartOff, int countX, int countY, int typeCode,
-            long ptrX, long ptrY, long ptrZ, boolean hasMAC,
-            Memory memory, AddressSpace space) {
-        DensoTableType declared = DensoTableType.fromCode(typeCode);
-        if (!declared.isValid()) {
-            return null;
-        }
+    /** Attempts to parse a 1-D table header at {@code buf[off]}. */
+    private static DensoTable1D tryParse1D(byte[] buf, int off, long blockStartOff,
+            ScanContext ctx) {
 
-        if (!hasMAC && typeCode == DensoTableType.FLOAT.getCode()) {
-            DensoTableType inferred = inferPacked2DDataType(buf, off, blockStartOff,
-                    countX, countY, ptrX, ptrY, ptrZ, memory, space);
-            if (inferred != null) {
-                return inferred;
+        OneDHeaderPattern hdr = read1DHeaderPattern(buf, off, ctx);
+        if (hdr == null) return null;
+
+        int countX = hdr.count();
+
+        // Optional MAC
+        boolean hasMAC = false;
+        float multiplier = 1.0f, macOffset = 0.0f;
+        if (off + 20 <= buf.length) {
+            float m = readFloatBE(buf, off + 12);
+            float o = readFloatBE(buf, off + 16);
+            if (DensoTable.validateMacParameters(m, o) == null) {
+                hasMAC = true;
+                multiplier = m;
+                macOffset = o;
             }
         }
 
-        return declared;
+        float[] valuesX = readFloatArrayFromMemory(ctx, hdr.ptrX(), countX);
+        if (valuesX == null) return null;
+
+        DensoTableType declared = DensoTableType.fromCode(hdr.typeCode());
+        DensoTableType dtype = declared;
+        if (!hasMAC && declared == DensoTableType.FLOAT) {
+            // Some no-MAC 1-D descriptors use a compact payload layout where 0x00
+            // does not actually mean 4-byte float data. Infer that from
+            // neighboring headers and pointer spacing first.
+            DensoTableType packed = inferPacked1DDataType(buf, off, blockStartOff,
+                    countX, hdr.ptrX(), hdr.ptrY(), ctx);
+            if (packed != null) {
+                dtype = packed;
+            }
+            else if (!hasValidFloatPayload(ctx, hdr.ptrY(), countX)) {
+                // ScoobyRom: float without MAC whose values aren't valid floats is
+                // UInt16; zero padding after the payload can show it is UInt8.
+                DensoTableType aligned = inferAlignedIntegerDataType(ctx, hdr.ptrY(), countX);
+                dtype = aligned != null ? aligned : DensoTableType.UINT16;
+            }
+        }
+
+        double[] valuesY = readDataArray1D(ctx, hdr.ptrY(), countX, dtype);
+        if (valuesY == null) return null;
+
+        long headerAddr = blockStartOff + off;
+        DensoTable1D t = new DensoTable1D();
+        t.setHeaderAddress(headerAddr);
+        t.setPtrX(hdr.ptrX());
+        t.setPtrY(hdr.ptrY());
+        t.setCountX(countX);
+        t.setDataType(dtype);
+        t.setTypeInferred(dtype != declared);
+        t.setHasMAC(hasMAC);
+        t.setMultiplier(multiplier);
+        t.setOffset(macOffset);
+        t.setValuesX(valuesX);
+        t.setValuesY(valuesY);
+        t.setName("Table1D_0x" + Long.toHexString(headerAddr).toUpperCase());
+        return t;
     }
 
+    /**
+     * Reads and validates a 1-D record's fixed fields and axis at {@code buf[off]}:
+     * counts, type code, pointer placement, non-overlapping ranges and a valid X axis.
+     */
+    private static OneDHeaderPattern read1DHeaderPattern(byte[] buf, int off, ScanContext ctx) {
+        if (off < 0 || off + 12 > buf.length) {
+            return null;
+        }
+
+        int countX = readInt16BE(buf, off);
+        int typeCode = buf[off + 2] & 0xFF;
+        // High byte of the 2-byte little-endian type field must be zero
+        if (!isValidCount(countX) || (buf[off + 3] & 0xFF) != 0) {
+            return null;
+        }
+        if (!DensoTableType.fromCode(typeCode).isValid()) {
+            return null;
+        }
+
+        long ptrX = readInt32BE(buf, off + 4);
+        long ptrY = readInt32BE(buf, off + 8);
+        long xLen = 4L * countX;
+        // Data is sized as 1 byte per value for the overlap check: the type can be wrong.
+        long yLen = countX;
+        if (ptrX == ptrY || overlaps(ptrX, xLen, ptrY, yLen)) {
+            return null;
+        }
+        if (!ctx.isReadable(ptrX, xLen) || !ctx.isReadable(ptrY, yLen)) {
+            return null;
+        }
+
+        float[] valuesX = readFloatArrayFromMemory(ctx, ptrX, countX);
+        if (valuesX == null || !isValidAxis(valuesX)) {
+            return null;
+        }
+
+        return new OneDHeaderPattern(countX, typeCode, ptrX, ptrY);
+    }
+
+    /**
+     * Reads and validates a 2-D record's fixed fields and axes at {@code buf[off]}:
+     * counts, type code, pointer placement, non-overlapping ranges and valid X/Y axes.
+     */
+    private static TwoDHeaderPattern read2DHeaderPattern(byte[] buf, int off, ScanContext ctx) {
+        if (off < 0 || off + 20 > buf.length) {
+            return null;
+        }
+
+        int countX = readInt16BE(buf, off);
+        int countY = readInt16BE(buf, off + 2);
+        if (!isValidCount(countX) || !isValidCount(countY)) {
+            return null;
+        }
+        int typeCode = buf[off + 16] & 0xFF;
+        // Remaining 3 bytes of the little-endian type field must be zero
+        if ((buf[off + 17] | buf[off + 18] | buf[off + 19]) != 0) {
+            return null;
+        }
+        if (!DensoTableType.fromCode(typeCode).isValid()) {
+            return null;
+        }
+
+        long ptrX = readInt32BE(buf, off + 4);
+        long ptrY = readInt32BE(buf, off + 8);
+        long ptrZ = readInt32BE(buf, off + 12);
+        long xLen = 4L * countX;
+        long yLen = 4L * countY;
+        // Data is sized as 1 byte per value for the overlap check: the type can be wrong.
+        long zLen = (long) countX * countY;
+        if (ptrX == ptrY || ptrX == ptrZ || ptrY == ptrZ
+                || overlaps(ptrX, xLen, ptrY, yLen)
+                || overlaps(ptrX, xLen, ptrZ, zLen)
+                || overlaps(ptrY, yLen, ptrZ, zLen)) {
+            return null;
+        }
+        if (!ctx.isReadable(ptrX, xLen) || !ctx.isReadable(ptrY, yLen)
+                || !ctx.isReadable(ptrZ, zLen)) {
+            return null;
+        }
+
+        float[] valuesX = readFloatArrayFromMemory(ctx, ptrX, countX);
+        if (valuesX == null || !isValidAxis(valuesX)) {
+            return null;
+        }
+        float[] valuesY = readFloatArrayFromMemory(ctx, ptrY, countY);
+        if (valuesY == null || !isValidAxis(valuesY)) {
+            return null;
+        }
+
+        return new TwoDHeaderPattern(countX, countY, typeCode, ptrX, ptrY, ptrZ);
+    }
+
+    // =========================================================================
+    // Data type inference (refines the type, never rejects a record)
+    // =========================================================================
+
     private static DensoTableType inferPacked2DDataType(byte[] buf, int off,
-            long blockStartOff, int countX, int countY, long ptrX, long ptrY, long ptrZ,
-            Memory memory, AddressSpace space) {
-        long nextPtr = findNextLocalDataPointer(buf, off, blockStartOff, ptrZ,
-                memory, space);
+            long blockStartOff, long ptrZ, int countX, int countY, ScanContext ctx) {
+        long nextPtr = findNextLocalDataPointer(buf, off, blockStartOff, ptrZ, ctx);
         if (nextPtr == Long.MAX_VALUE) {
             return null;
         }
@@ -325,109 +466,9 @@ public final class DensoTableScanner {
         return null;
     }
 
-    /** Attempts to parse a 1-D table header at {@code buf[offset]}. */
-    private static DensoTable1D tryParse1D(byte[] buf, int off,
-            long blockStartOff, Memory memory, AddressSpace space) {
-
-        int countX   = readInt16BE(buf, off);
-        int typeCode = buf[off + 2] & 0xFF;   // little-endian: first byte
-        if (!isValidCount(countX)) return null;
-
-        // High byte of the 2-byte type field must be zero
-        if ((buf[off + 3] & 0xFF) != 0) return null;
-
-        if (!DensoTableType.fromCode(typeCode).isValid()) return null;
-
-        long ptrX = readInt32BE(buf, off + 4);
-        long ptrY = readInt32BE(buf, off + 8);
-
-        long headerAddr = blockStartOff + off;
-        if (!isValidPointer(ptrX, headerAddr, memory, space)) return null;
-        if (!isValidPointer(ptrY, headerAddr, memory, space)) return null;
-
-        // Optional MAC
-        boolean hasMAC = false;
-        float multiplier = 1.0f, macOffset = 0.0f;
-        if (off + 20 <= buf.length) {
-            float m = readFloatBE(buf, off + 12);
-            float o = readFloatBE(buf, off + 16);
-            if (isPlausibleMultiplier(m) && Float.isFinite(o)) {
-                hasMAC = true;
-                multiplier = m;
-                macOffset = o;
-            }
-        }
-
-        // X axis must be finite and ordered
-        float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
-        if (valuesX == null || !isMonotonicFinite(valuesX)) return null;
-
-        DensoTableType dtype = resolve1DDataType(buf, off, blockStartOff, countX,
-                typeCode, ptrX, ptrY, hasMAC, memory, space);
-        if (dtype == null) return null;
-
-        double[] valuesY = readDataArray1D(memory, space, ptrY, countX, dtype);
-        if (valuesY == null) return null;
-
-        // For float data, raw Y values must be finite and within calibration range
-        if (dtype == DensoTableType.FLOAT) {
-            for (double v : valuesY) {
-                if (!isPlausibleCalibrationFloat(v)) return null;
-            }
-        }
-
-        // Y data is stored as raw values; the editor applies the MAC when displaying.
-
-        DensoTable1D t = new DensoTable1D();
-        t.setHeaderAddress(headerAddr);
-        t.setPtrX(ptrX);
-        t.setPtrY(ptrY);
-        t.setCountX(countX);
-        t.setDataType(dtype);
-        t.setHasMAC(hasMAC);
-        t.setMultiplier(multiplier);
-        t.setOffset(macOffset);
-        t.setValuesX(valuesX);
-        t.setValuesY(valuesY);
-        t.setName("Table1D_0x" + Long.toHexString(headerAddr).toUpperCase());
-        return t;
-    }
-
-    private static DensoTableType resolve1DDataType(byte[] buf, int off,
-            long blockStartOff, int countX, int typeCode, long ptrX, long ptrY,
-            boolean hasMAC, Memory memory, AddressSpace space) {
-        DensoTableType declared = DensoTableType.fromCode(typeCode);
-        if (!declared.isValid()) {
-            return null;
-        }
-
-        // Some no-MAC 1-D descriptors use a compact payload layout where 0x00 does
-        // not actually mean 4-byte float data. Infer that from neighboring headers
-        // and pointer spacing before falling back to the nominal float decode.
-        if (!hasMAC && typeCode == DensoTableType.FLOAT.getCode()) {
-            DensoTableType inferred = inferPacked1DDataType(buf, off, blockStartOff,
-                    countX, ptrX, ptrY, memory, space);
-            if (inferred != null) {
-                return inferred;
-            }
-
-            if (hasWeakFloatPayload(memory, space, ptrY, countX)) {
-                DensoTableType aligned = inferAlignedIntegerDataType(memory, space,
-                        ptrY, countX);
-                if (aligned != null) {
-                    return aligned;
-                }
-            }
-        }
-
-        return declared;
-    }
-
     private static DensoTableType inferPacked1DDataType(byte[] buf, int off,
-            long blockStartOff, int countX, long ptrX, long ptrY,
-            Memory memory, AddressSpace space) {
-        long nextPtr = findNextLocalDataPointer(buf, off, blockStartOff, ptrY,
-                memory, space);
+            long blockStartOff, int countX, long ptrX, long ptrY, ScanContext ctx) {
+        long nextPtr = findNextLocalDataPointer(buf, off, blockStartOff, ptrY, ctx);
         long yStride = nextPtr == Long.MAX_VALUE ? Long.MAX_VALUE : nextPtr - ptrY;
         if (matchesCompactPayloadStride(yStride, countX)) {
             return DensoTableType.UINT8;
@@ -438,22 +479,21 @@ public final class DensoTableScanner {
         }
 
         for (int delta : AMBIGUOUS_1D_NEIGHBOR_OFFSETS) {
-            OneDHeaderPattern sibling = read1DHeaderPattern(buf, off + delta,
-                    blockStartOff, memory, space);
-            if (sibling == null || sibling.count != countX) {
+            OneDHeaderPattern sibling = read1DHeaderPattern(buf, off + delta, ctx);
+            if (sibling == null || sibling.count() != countX) {
                 continue;
             }
 
-            long xStride = Math.abs(sibling.ptrX - ptrX);
+            long xStride = Math.abs(sibling.ptrX() - ptrX);
             if (xStride != countX * 4L) {
                 continue;
             }
 
-            long siblingYStride = Math.abs(sibling.ptrY - ptrY);
-            DensoTableType siblingType = DensoTableType.fromCode(sibling.typeCode);
+            long siblingYStride = Math.abs(sibling.ptrY() - ptrY);
+            DensoTableType siblingType = DensoTableType.fromCode(sibling.typeCode());
 
             if (siblingType.isValid()
-                    && sibling.typeCode != DensoTableType.FLOAT.getCode()
+                    && sibling.typeCode() != DensoTableType.FLOAT.getCode()
                     && siblingYStride == countX * (long) siblingType.getValueSize()) {
                 return siblingType;
             }
@@ -469,46 +509,33 @@ public final class DensoTableScanner {
         return null;
     }
 
-    private static boolean hasWeakFloatPayload(Memory memory, AddressSpace space,
-            long ptrY, int countX) {
-        double[] valuesY = readDataArray1D(memory, space, ptrY, countX,
-                DensoTableType.FLOAT);
-        if (valuesY == null) {
-            return true;
+    /** True when the payload reads as floats that all pass {@link DensoTable#isValidFloat}. */
+    private static boolean hasValidFloatPayload(ScanContext ctx, long ptr, int count) {
+        float[] values = readFloatArrayFromMemory(ctx, ptr, count);
+        if (values == null) {
+            return false;
         }
-
-        int plausibleCount = 0;
-        int longestRun = 0;
-        int currentRun = 0;
-        for (double v : valuesY) {
-            if (isPlausibleCalibrationFloat(v)) {
-                plausibleCount++;
-                currentRun++;
-                longestRun = Math.max(longestRun, currentRun);
-            }
-            else {
-                currentRun = 0;
-            }
+        for (float v : values) {
+            if (!DensoTable.isValidFloat(v)) return false;
         }
-
-        return plausibleCount <= countX / 4 && longestRun < 3;
+        return true;
     }
 
-    private static DensoTableType inferAlignedIntegerDataType(Memory memory,
-            AddressSpace space, long ptrY, int countX) {
-        if (hasAlignedIntegerSlots(memory, space, ptrY, countX,
+    private static DensoTableType inferAlignedIntegerDataType(ScanContext ctx, long ptrY,
+            int countX) {
+        if (hasAlignedIntegerSlots(ctx, ptrY, countX,
                 DensoTableType.UINT16.getValueSize())) {
             return DensoTableType.UINT16;
         }
-        if (hasAlignedIntegerSlots(memory, space, ptrY, countX,
+        if (hasAlignedIntegerSlots(ctx, ptrY, countX,
                 DensoTableType.UINT8.getValueSize())) {
             return DensoTableType.UINT8;
         }
         return null;
     }
 
-    private static boolean hasAlignedIntegerSlots(Memory memory, AddressSpace space,
-            long ptr, int count, int elemSize) {
+    private static boolean hasAlignedIntegerSlots(ScanContext ctx, long ptr, int count,
+            int elemSize) {
         int payloadSize = count * elemSize;
         int alignedSize = alignTo4(payloadSize);
         if (alignedSize == payloadSize) {
@@ -516,9 +543,9 @@ public final class DensoTableScanner {
         }
 
         int slotsToCheck = 2;
-        byte[] raw = readBytesFromMemory(memory, space, ptr, alignedSize * slotsToCheck);
+        byte[] raw = readBytesFromMemory(ctx, ptr, alignedSize * slotsToCheck);
         if (raw == null) {
-            raw = readBytesFromMemory(memory, space, ptr, alignedSize);
+            raw = readBytesFromMemory(ctx, ptr, alignedSize);
             slotsToCheck = raw == null ? 0 : 1;
         }
         if (raw == null || slotsToCheck == 0) {
@@ -557,7 +584,7 @@ public final class DensoTableScanner {
     }
 
     private static long findNextLocalDataPointer(byte[] buf, int off,
-            long blockStartOff, long ptr, Memory memory, AddressSpace space) {
+            long blockStartOff, long ptr, ScanContext ctx) {
         long nextPtr = Long.MAX_VALUE;
 
         // Every 4-byte aligned descriptor within +/- LOCAL_DESCRIPTOR_SCAN_BYTES,
@@ -565,114 +592,40 @@ public final class DensoTableScanner {
         int scanStart = Math.max(0, off - LOCAL_DESCRIPTOR_SCAN_BYTES);
         int scanEnd = Math.min(buf.length - 12, off + LOCAL_DESCRIPTOR_SCAN_BYTES);
         for (int neighborOff = scanStart; neighborOff <= scanEnd; neighborOff += 4) {
-            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, neighborOff,
-                    blockStartOff, ptr, memory, space));
+            nextPtr = Math.min(nextPtr, nextHigherLocalDataPointer(buf, neighborOff, ptr, ctx));
         }
 
         return nextPtr;
     }
 
-    private static long nextHigherLocalDataPointer(byte[] buf, int off,
-            long blockStartOff, long ptr, Memory memory, AddressSpace space) {
+    private static long nextHigherLocalDataPointer(byte[] buf, int off, long ptr,
+            ScanContext ctx) {
         long nextPtr = Long.MAX_VALUE;
 
-        OneDHeaderPattern oneD = read1DHeaderPattern(buf, off, blockStartOff,
-                memory, space);
+        OneDHeaderPattern oneD = read1DHeaderPattern(buf, off, ctx);
         if (oneD != null) {
-            if (oneD.ptrX > ptr) {
-                nextPtr = Math.min(nextPtr, oneD.ptrX);
+            if (oneD.ptrX() > ptr) {
+                nextPtr = Math.min(nextPtr, oneD.ptrX());
             }
-            if (oneD.ptrY > ptr) {
-                nextPtr = Math.min(nextPtr, oneD.ptrY);
+            if (oneD.ptrY() > ptr) {
+                nextPtr = Math.min(nextPtr, oneD.ptrY());
             }
         }
 
-        TwoDHeaderPattern twoD = read2DHeaderPattern(buf, off, blockStartOff,
-                memory, space);
+        TwoDHeaderPattern twoD = read2DHeaderPattern(buf, off, ctx);
         if (twoD != null) {
-            if (twoD.ptrX > ptr) {
-                nextPtr = Math.min(nextPtr, twoD.ptrX);
+            if (twoD.ptrX() > ptr) {
+                nextPtr = Math.min(nextPtr, twoD.ptrX());
             }
-            if (twoD.ptrY > ptr) {
-                nextPtr = Math.min(nextPtr, twoD.ptrY);
+            if (twoD.ptrY() > ptr) {
+                nextPtr = Math.min(nextPtr, twoD.ptrY());
             }
-            if (twoD.ptrZ > ptr) {
-                nextPtr = Math.min(nextPtr, twoD.ptrZ);
+            if (twoD.ptrZ() > ptr) {
+                nextPtr = Math.min(nextPtr, twoD.ptrZ());
             }
         }
 
         return nextPtr;
-    }
-
-    private static OneDHeaderPattern read1DHeaderPattern(byte[] buf, int off,
-            long blockStartOff, Memory memory, AddressSpace space) {
-        if (off < 0 || off + 12 > buf.length) {
-            return null;
-        }
-
-        int countX = readInt16BE(buf, off);
-        int typeCode = buf[off + 2] & 0xFF;
-        if (!isValidCount(countX) || (buf[off + 3] & 0xFF) != 0) {
-            return null;
-        }
-
-        if (!DensoTableType.fromCode(typeCode).isValid()) {
-            return null;
-        }
-
-        long ptrX = readInt32BE(buf, off + 4);
-        long ptrY = readInt32BE(buf, off + 8);
-        long headerAddr = blockStartOff + off;
-        if (!isValidPointer(ptrX, headerAddr, memory, space)
-                || !isValidPointer(ptrY, headerAddr, memory, space)) {
-            return null;
-        }
-
-        float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
-        if (valuesX == null || !isMonotonicFinite(valuesX)) {
-            return null;
-        }
-
-        return new OneDHeaderPattern(countX, typeCode, ptrX, ptrY);
-    }
-
-    private static TwoDHeaderPattern read2DHeaderPattern(byte[] buf, int off,
-            long blockStartOff, Memory memory, AddressSpace space) {
-        if (off < 0 || off + 20 > buf.length) {
-            return null;
-        }
-
-        int countX = readInt16BE(buf, off);
-        int countY = readInt16BE(buf, off + 2);
-        int typeCode = buf[off + 16] & 0xFF;
-        if (!isValidCount(countX) || !isValidCount(countY)) {
-            return null;
-        }
-        if ((buf[off + 17] | buf[off + 18] | buf[off + 19]) != 0) {
-            return null;
-        }
-        if (!DensoTableType.fromCode(typeCode).isValid()) {
-            return null;
-        }
-
-        long ptrX = readInt32BE(buf, off + 4);
-        long ptrY = readInt32BE(buf, off + 8);
-        long ptrZ = readInt32BE(buf, off + 12);
-        long headerAddr = blockStartOff + off;
-        if (!isValidPointer(ptrX, headerAddr, memory, space)
-                || !isValidPointer(ptrY, headerAddr, memory, space)
-                || !isValidPointer(ptrZ, headerAddr, memory, space)) {
-            return null;
-        }
-
-        float[] valuesX = readFloatArrayFromMemory(memory, space, ptrX, countX);
-        float[] valuesY = readFloatArrayFromMemory(memory, space, ptrY, countY);
-        if (valuesX == null || valuesY == null
-                || !isMonotonicFinite(valuesX) || !isMonotonicFinite(valuesY)) {
-            return null;
-        }
-
-        return new TwoDHeaderPattern(countX, countY, typeCode, ptrX, ptrY, ptrZ);
     }
 
     // =========================================================================
@@ -683,29 +636,27 @@ public final class DensoTableScanner {
      * Reads {@code count} big-endian floats starting at the given address.
      * Returns {@code null} on any access error.
      */
-    private static float[] readFloatArrayFromMemory(Memory mem, AddressSpace space,
-            long ptr, int count) {
-        try {
-            Address addr = space.getAddress(ptr);
-            byte[] raw = new byte[count * 4];
-            mem.getBytes(addr, raw);
-            float[] out = new float[count];
-            for (int i = 0; i < count; i++) {
-                out[i] = readFloatBE(raw, i * 4);
-            }
-            return out;
-        }
-        catch (Exception e) {
+    private static float[] readFloatArrayFromMemory(ScanContext ctx, long ptr, int count) {
+        byte[] raw = readBytesFromMemory(ctx, ptr, count * 4);
+        if (raw == null) {
             return null;
         }
+        float[] out = new float[count];
+        for (int i = 0; i < count; i++) {
+            out[i] = readFloatBE(raw, i * 4);
+        }
+        return out;
     }
 
-    private static byte[] readBytesFromMemory(Memory mem, AddressSpace space,
-            long ptr, int size) {
+    private static byte[] readBytesFromMemory(ScanContext ctx, long ptr, int size) {
+        if (!ctx.isReadable(ptr, size)) {
+            return null;
+        }
         try {
-            Address addr = space.getAddress(ptr);
             byte[] raw = new byte[size];
-            mem.getBytes(addr, raw);
+            if (ctx.memory().getBytes(ctx.space().getAddress(ptr), raw) != size) {
+                return null;
+            }
             return raw;
         }
         catch (Exception e) {
@@ -714,46 +665,36 @@ public final class DensoTableScanner {
     }
 
     /** Reads a 1-D data array of the given type (big-endian). */
-    private static double[] readDataArray1D(Memory mem, AddressSpace space,
-            long ptr, int count, DensoTableType dtype) {
-        try {
-            int elemSize = dtype.getValueSize();
-            Address addr = space.getAddress(ptr);
-            byte[] raw = new byte[count * elemSize];
-            mem.getBytes(addr, raw);
-            double[] out = new double[count];
-            for (int i = 0; i < count; i++) {
-                long rawVal = readBigEndian(raw, i * elemSize, elemSize);
-                out[i] = dtype.rawToDouble(rawVal);
-            }
-            return out;
-        }
-        catch (Exception e) {
+    private static double[] readDataArray1D(ScanContext ctx, long ptr, int count,
+            DensoTableType dtype) {
+        int elemSize = dtype.getValueSize();
+        byte[] raw = readBytesFromMemory(ctx, ptr, count * elemSize);
+        if (raw == null) {
             return null;
         }
+        double[] out = new double[count];
+        for (int i = 0; i < count; i++) {
+            out[i] = dtype.rawToDouble(readBigEndian(raw, i * elemSize, elemSize));
+        }
+        return out;
     }
 
     /** Reads a 2-D data matrix (row-major) of the given type (big-endian). */
-    private static double[][] readDataMatrix(Memory mem, AddressSpace space,
-            long ptr, int countX, int countY, DensoTableType dtype) {
-        try {
-            int elemSize = dtype.getValueSize();
-            Address addr = space.getAddress(ptr);
-            byte[] raw = new byte[countX * countY * elemSize];
-            mem.getBytes(addr, raw);
-            double[][] out = new double[countY][countX];
-            for (int y = 0; y < countY; y++) {
-                for (int x = 0; x < countX; x++) {
-                    int byteOff = (y * countX + x) * elemSize;
-                    long rawVal = readBigEndian(raw, byteOff, elemSize);
-                    out[y][x] = dtype.rawToDouble(rawVal);
-                }
-            }
-            return out;
-        }
-        catch (Exception e) {
+    private static double[][] readDataMatrix(ScanContext ctx, long ptr, int countX,
+            int countY, DensoTableType dtype) {
+        int elemSize = dtype.getValueSize();
+        byte[] raw = readBytesFromMemory(ctx, ptr, countX * countY * elemSize);
+        if (raw == null) {
             return null;
         }
+        double[][] out = new double[countY][countX];
+        for (int y = 0; y < countY; y++) {
+            for (int x = 0; x < countX; x++) {
+                int byteOff = (y * countX + x) * elemSize;
+                out[y][x] = dtype.rawToDouble(readBigEndian(raw, byteOff, elemSize));
+            }
+        }
+        return out;
     }
 
     // =========================================================================
@@ -791,69 +732,24 @@ public final class DensoTableScanner {
     // =========================================================================
 
     /**
-     * Returns true for MAC multiplier values that are plausible for ECU calibration.
-     * Real multipliers are human-chosen scale factors (e.g. 9.536743e-7, 0.00457,
-     * 0.1, 1.0, 2.5, 100). Values outside [1e-7, 1e6] are either noise or
-     * misread ROM bytes.
+     * Returns true if every value is a valid calibration float and the array is
+     * non-decreasing. Duplicate breakpoints do occur in real calibrations (e.g. a
+     * MAF axis), so only descending axes are rejected.
      */
-    private static boolean isPlausibleMultiplier(float v) {
-        return DensoTable.validateMacParameters(v, 0.0f) == null;
-    }
-
-    /**
-     * Upper bound on any plausible calibration float.
-     * Legitimate ECU breakpoints and table values (RPM, temperature, pressure, load, …)
-     * are always well below this; the huge values that slip through from misread ROM
-     * bytes (e.g. 4.9e36) are not.
-     */
-    private static final float MAX_AXIS_VALUE = 1e9f;
-
-    /**
-     * Minimum magnitude for a meaningful non-zero calibration float.
-     * Values down near 1e-38 commonly come from byte-filled arrays such as 0x01010101
-     * or 0x02020202 being misread as floats, not from real calibration data.
-     */
-    private static final double MIN_NON_ZERO_CALIBRATION_FLOAT = 1e-20;
-
-    /**
-     * Returns true if every value is finite, within a plausible calibration range,
-     * not subnormal (unless zero), and the array is monotonic non-decreasing.
-     * Duplicate breakpoints do occur in real calibrations, so only descending axes
-     * are rejected.
-     */
-    private static boolean isMonotonicFinite(float[] arr) {
+    static boolean isValidAxis(float[] arr) {
         for (int i = 0; i < arr.length; i++) {
-            if (!isPlausibleCalibrationFloat(arr[i])) return false;
+            if (!DensoTable.isValidFloat(arr[i])) return false;
             if (i > 0 && arr[i] < arr[i - 1]) return false;
         }
         return true;
-    }
-
-    private static boolean isPlausibleCalibrationFloat(double v) {
-        if (!Double.isFinite(v)) return false;
-        if (Math.abs(v) > MAX_AXIS_VALUE) return false;
-        if (v == 0.0) return true;
-        // Subnormal and vanishingly small normals are almost always misread bytes.
-        return Math.abs(v) >= Float.MIN_NORMAL
-                && Math.abs(v) >= MIN_NON_ZERO_CALIBRATION_FLOAT;
     }
 
     private static boolean isValidCount(int count) {
         return count >= MIN_COUNT && count <= MAX_COUNT;
     }
 
-    /**
-     * Validates that {@code ptr} addresses initialised memory and is at least
-     * {@link #MIN_POINTER_DISTANCE} bytes away from {@code headerAddr}.
-     */
-    private static boolean isValidPointer(long ptr, long headerAddr,
-            Memory memory, AddressSpace space) {
-        if (Math.abs(ptr - headerAddr) < MIN_POINTER_DISTANCE) return false;
-        try {
-            return memory.contains(space.getAddress(ptr));
-        }
-        catch (Exception e) {
-            return false;
-        }
+    /** True when {@code [a, a + aLen)} and {@code [b, b + bLen)} share any byte. */
+    private static boolean overlaps(long a, long aLen, long b, long bLen) {
+        return a < b + bLen && b < a + aLen;
     }
 }

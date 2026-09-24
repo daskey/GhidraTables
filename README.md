@@ -121,13 +121,17 @@ This is useful for quick local shaping without typing values manually.
 
 Detection is pattern-based and intentionally permissive enough to catch compact Denso table layouts that are easy to miss in dense calibration regions. That also means you should still validate candidates before editing them.
 
-What the scanner checks, at every 4-byte aligned offset of each initialized memory block in the program's default address space:
+Detection follows [ScoobyRom](https://github.com/aalesv/ScoobyRom); its "2D" and "3D" tables are this extension's 1D and 2D tables. At every 4-byte aligned offset of each initialized memory block in the program's default address space, the scanner tries a 2D record, then a 1D record, and checks:
 
-- Axis counts are between 1 and 250, and the type field holds a known type code with its unused bytes zero.
-- Every pointer lands in loaded memory at least `0x100` bytes from the header.
-- Axis arrays are finite, plausible, non-decreasing floats. Float payloads must also be plausible floats.
-- A MAC pair is assumed when the 8 bytes after the header decode to a multiplier in `[1e-7, 1e6]` and a finite offset.
-- Headers that declare float data (`0x00`) without a MAC are checked against neighboring descriptors. If the gap to the next data pointer matches a packed 8-bit or 16-bit payload, the table is read as `UInt8` or `UInt16` instead. This is an inference, so confirm the data type in the listing.
+- Axis counts are between 2 and 255, and the type field holds a known type code with its unused bytes zero.
+- Every pointer is at least 8 KiB into the ROM and inside initialized memory. The pointers differ from each other and the axis/data ranges don't overlap. For that check the data is sized at one byte per value, because the declared type can be wrong.
+- Axis arrays are non-decreasing, and every value is 0 or has a magnitude between `1e-12` and `1e12`.
+- A MAC pair is present when the 8 bytes after the record are a non-zero multiplier and an offset that pass the same value check.
+- Table data never causes a record to be rejected; it only refines the data type. When a record declares float data (`0x00`) without a MAC:
+  - if the gap to the next data pointer of a neighboring record matches a packed 8-bit or 16-bit payload, the table is read as `UInt8` or `UInt16`;
+  - otherwise, if the payload isn't valid floats, it is read as `UInt16` (or `UInt8` when zero padding shows 8-bit values), as ScoobyRom does.
+
+Inferred data types are shown with a `?` (for example `UInt16?`) in the table list and editor. Confirm them in the listing before editing.
 
 Blocks outside the default address space (overlays, other spaces) are not scanned, because table addresses are read, written, and marked up in the default space. When blocks are skipped, the status bar says how many, and hovering over it lists them. The same list is written to the Ghidra log.
 
