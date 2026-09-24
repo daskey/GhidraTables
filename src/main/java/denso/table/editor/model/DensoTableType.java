@@ -71,7 +71,7 @@ public enum DensoTableType {
     }
 
     /**
-     * Converts a physical double value to a raw long suitable for writing
+     * Encodes an unscaled storage value as bits suitable for writing
      * back to the ROM (big-endian bytes will be assembled by the caller).
      */
     public long doubleToRaw(double value) {
@@ -82,8 +82,43 @@ public enum DensoTableType {
             case INT8    -> requireSignedRaw(value, Byte.MIN_VALUE, Byte.MAX_VALUE, "Int8", 8);
             case INT16   -> requireSignedRaw(value, Short.MIN_VALUE, Short.MAX_VALUE, "Int16", 16);
             case UINT32  -> requireRoundedIntegralInRange(value, 0, 0xFFFFFFFFL, "UInt32");
-            default      -> requireFiniteLong(value, "value");
+            default      -> throw new IllegalArgumentException("Undefined storage type.");
         };
+    }
+
+    /** Returns exactly the value that encoding and reading it back will produce. */
+    public double quantize(double value) {
+        return rawToDouble(doubleToRaw(value));
+    }
+
+    public double minimumValue() {
+        return switch (this) {
+            case FLOAT -> -Float.MAX_VALUE;
+            case INT8 -> Byte.MIN_VALUE;
+            case INT16 -> Short.MIN_VALUE;
+            case UINT8, UINT16, UINT32 -> 0;
+            default -> throw new IllegalArgumentException("Undefined storage type.");
+        };
+    }
+
+    public double maximumValue() {
+        return switch (this) {
+            case FLOAT -> Float.MAX_VALUE;
+            case INT8 -> Byte.MAX_VALUE;
+            case INT16 -> Short.MAX_VALUE;
+            case UINT8 -> 255;
+            case UINT16 -> 65535;
+            case UINT32 -> 0xFFFFFFFFL;
+            default -> throw new IllegalArgumentException("Undefined storage type.");
+        };
+    }
+
+    /** Saturation is used only for incremental wheel adjustments. Typed edits are validated. */
+    public double clampAndQuantize(double value) {
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException("Value must be finite.");
+        }
+        return quantize(Math.max(minimumValue(), Math.min(maximumValue(), value)));
     }
 
     private static long floatToRaw(double value) {

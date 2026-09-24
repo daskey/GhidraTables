@@ -90,7 +90,12 @@ public abstract class DensoTable {
      * If no MAC is present the physical value is returned unchanged.
      */
     public double toRaw(double physical) {
-        if (hasMAC && multiplier != 0f) {
+        if (!Double.isFinite(physical)) {
+            throw new IllegalArgumentException("Value must be finite.");
+        }
+        if (hasMAC) {
+            String error = validateMacParameters(multiplier, offset);
+            if (error != null) throw new IllegalArgumentException(error);
             return (physical - offset) / multiplier;
         }
         return physical;
@@ -112,7 +117,7 @@ public abstract class DensoTable {
         if (!Float.isFinite(multiplier) ||
                 Math.abs(multiplier) < MIN_MAC_MULTIPLIER ||
                 Math.abs(multiplier) > MAX_MAC_MULTIPLIER) {
-            return "Multiplier must be finite and within [1e-7, 1e6].";
+            return "Multiplier magnitude must be within [1e-7, 1e6].";
         }
         if (!Float.isFinite(offset)) {
             return "Offset must be a finite value.";

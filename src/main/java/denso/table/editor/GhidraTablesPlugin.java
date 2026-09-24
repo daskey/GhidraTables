@@ -11,6 +11,7 @@ import ghidra.app.plugin.ProgramPlugin;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.util.PluginStatus;
+import ghidra.framework.model.DomainObject;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
 import ghidra.program.util.ProgramSelection;
@@ -74,8 +75,24 @@ public class GhidraTablesPlugin extends ProgramPlugin {
     protected void selectionChanged(ProgramSelection sel) { /* not used */ }
 
     @Override
+    protected void programClosed(Program program) {
+        listProvider.programClosed(program);
+    }
+
+    @Override
+    protected boolean canCloseDomainObject(DomainObject object) {
+        return !(object instanceof Program program) || listProvider.canCloseEditors(program);
+    }
+
+    @Override
+    protected boolean canClose() {
+        return listProvider.canCloseEditors(null);
+    }
+
+    @Override
     protected void dispose() {
         listProvider.dispose();
+        super.dispose();
     }
 
     // ── Package-visible helpers ───────────────────────────────────────────────

@@ -61,7 +61,8 @@ public class Surface3DPanel extends JPanel {
 
             canvasComponent = (Component) chart.getCanvas();
             add(canvasComponent, BorderLayout.CENTER);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
+            dispose();
             // Fallback if jzy3d initialization fails
             JLabel errorLabel = new JLabel("3D rendering unavailable: " + e.getMessage());
             errorLabel.setHorizontalAlignment(SwingConstants.CENTER);
@@ -261,6 +262,8 @@ public class Surface3DPanel extends JPanel {
      * Cleans up chart resources when the panel is no longer needed.
      */
     public void dispose() {
+        currentSurface = null;
+        table = null;
         if (chart != null) {
             try {
                 chart.dispose();

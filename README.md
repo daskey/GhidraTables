@@ -23,7 +23,7 @@ Use it as an accelerator for analysis, not as a substitute for understanding the
 
 ## Build
 
-Set `GHIDRA_INSTALL_DIR` to a compatible Ghidra installation, then run the Gradle wrapper from the project root.
+Use JDK 21 and set `GHIDRA_INSTALL_DIR` to your Ghidra installation, then run the Gradle wrapper from the project root. The build and tests target Ghidra 11.4.2 with Gradle 8.14.5. The `dev` branch includes a read-only 3D view using jzy3d.
 
 ```powershell
 $env:GHIDRA_INSTALL_DIR="C:\path\to\ghidra"
@@ -70,8 +70,11 @@ The editor displays physical values, but stores and writes raw table data.
 
 - Click or drag to select cells.
 - Multi-cell edits apply across the current selection.
-- `Undo` is single-level.
-- `Copy` and `Paste` work on rectangular selections.
+- `Undo` keeps the last 50 operations, including typing, paste, curve tools, and MAC changes.
+- `Ctrl+Z` undoes; `Ctrl+Y` or `Ctrl+Shift+Z` redoes. `Ctrl+S` saves.
+- `Ctrl+C` and `Ctrl+V` copy and paste full-precision values. Paste a rectangle at one selected anchor cell, or select a region of the same shape. A single copied value fills the selection.
+- Invalid, out-of-range, or read-only paste destinations reject the whole paste. No partial edits are kept.
+- Values are rounded to the storage type before display and save. Opening and closing an unchanged cell leaves it alone; deliberately retyping a value applies it across the selection.
 - `Set Value`, `Fill Right`, and `Fill Down` are available from the context menu.
 
 ### Curve Tools
@@ -85,27 +88,45 @@ The editor displays physical values, but stores and writes raw table data.
 
 ### Mouse Wheel Adjustment
 
-You can adjust selected editable cells with the mouse wheel.
+Hover over selected editable cells to adjust them with the mouse wheel. Elsewhere, the wheel scrolls the grid normally.
 
 - Mouse wheel: `+/- 1.0`
 - `Ctrl` + mouse wheel: `+/- 0.1`
 - `Shift` + mouse wheel: `+/- 10.0`
 - `Ctrl+Shift` + mouse wheel: `+/- 0.01`
 
-This is useful for quick local shaping without typing values manually.
+Consecutive ticks on the same selection and step within 500 ms share one undo entry. Adjustments saturate at the storage type limits; steps smaller than one representable storage unit may round to no change.
 
 ### Other Editor Actions
 
 - `Save` writes pending changes back to the loaded Ghidra program.
-- `Revert` reloads the table from ROM.
-- `Actions` exposes `Export CSV` and `Apply Structure`.
+- `Revert` reloads the table from ROM and clears edit history only after a successful read. A failed or incomplete reload retains the editor values.
+- `Actions` exposes `Export CSV` and `Apply Structure`. CSV includes axis breakpoints and full-precision physical values. Structure application rolls back the whole batch if any selected range fails.
 - `Inspector` toggles the right-hand info pane.
+- `3D` opens a read-only surface view, initialized when first requested.
+- Opening the same table again reuses its editor. Closing a program or the tool warns about unsaved editor values and closes its editor windows.
 
 ## Detection Notes
 
 Detection is pattern-based and intentionally permissive enough to catch compact Denso table layouts that are easy to miss in dense calibration regions. That also means you should still validate candidates before editing them.
 
-Low-level notes about the inferred interpolation descriptor families live in [docs/interpolation-structure-notes.md](docs/interpolation-structure-notes.md).
+The scanner reads initialized memory in the default address space in bounded chunks. Overlay blocks are excluded because the table model stores addresses in the default space. Header candidates must be aligned to an absolute four-byte address and all axis and data reads must complete. Compact payload types and optional MAC fields remain heuristic detections that need verification.
+
+## Tests
+
+With `GHIDRA_INSTALL_DIR` configured:
+
+```sh
+./gradlew test buildExtension
+```
+
+The default test run is headless. It covers type conversion, atomic reloads and edits, undo/redo, scanner boundaries and multi-cell editor behavior. Window tests are skipped without a display. To run them on Linux:
+
+```sh
+xvfb-run -a ./gradlew -Djava.awt.headless=false test buildExtension
+```
+
+The GitHub Actions workflow runs the window tests with Xvfb as well as packaging the extension.
 
 ## Short Version
 
