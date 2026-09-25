@@ -57,6 +57,7 @@ public class Surface3DPanel extends JPanel {
 
             chart = new EmulGLChartFactory().newChart(q);
             chart.getView().setBackgroundColor(toJzy3dColor(GhidraTheme.panelBackground()));
+            chart.getAxisLayout().setMainColor(toJzy3dColor(GhidraTheme.primaryForeground()));
             chart.addMouseCameraController();
 
             canvasComponent = (Component) chart.getCanvas();
