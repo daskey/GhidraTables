@@ -62,6 +62,8 @@ If you want Ghidra to lay out a whole calibration block properly:
 
 That will apply the detected table header plus the relevant axis/data structures so the listing becomes much easier to read and navigate.
 
+The header structures follow the layout the ECU's lookup code reads. `tableType` is the single type-code byte; the rest of its slot is `reserved` and always zero. `ptrX` and the 2D `ptrY` point to `float` axis arrays. The data pointer (`ptrZ`, or `ptrY` on 1D tables) is untyped, because the element type varies from table to table. If you type a lookup function's parameter as a pointer to one of these structures, the decompiler shows `table->tableType` and `table->ptrX` without casts. Applying structures replaces the header structures that earlier versions of the extension created, instead of adding `.conflict` copies.
+
 Axis arrays are often shared: several tables can point at the same axis, or at a shorter run of points inside a longer axis. Overlapping arrays of the same element type are merged into one array that covers all of them, and each table keeps its own `_XAxis` / `_YAxis` / `_ZData` label at its start address. Existing arrays of the same type are extended, never shortened, so re-applying a subset of tables is safe. A range that overlaps a header or an array of a different type in the same batch is left alone and reported.
 
 ## Table Editor

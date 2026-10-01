@@ -149,7 +149,10 @@ public final class DensoStructureApplier {
     private static void applyHeader(Program program, AddressSpace space, DensoTable table,
             AddressSet created, List<String> failures) {
         try {
-            StructureDataType hdr = buildHeaderStruct(table);
+            // Replace a same-named header struct from an earlier version of this
+            // extension, rather than adding a ".conflict" copy beside it.
+            DataType hdr = program.getDataTypeManager().resolve(buildHeaderStruct(table),
+                    DataTypeConflictHandler.REPLACE_HANDLER);
             Address addr = space.getAddress(table.getHeaderAddress());
             Address end = addr.add(hdr.getLength() - 1);
             Listing listing = program.getListing();
@@ -307,6 +310,9 @@ public final class DensoStructureApplier {
 
     // ── Header struct builders ────────────────────────────────────────────────
 
+    private static final String TYPE_CODE_COMMENT =
+            "Data type code: 0x00 float, 0x04 uint8, 0x08 uint16, 0x0C int8, 0x10 int16, 0xF1 uint32";
+
     private static String headerStructName(DensoTable table) {
         if (table.is2D()) {
             return table.isHasMAC() ? "DensoTable2DHeaderMacBE" : "DensoTable2DHeaderNoMacBE";
@@ -314,23 +320,33 @@ public final class DensoStructureApplier {
         return table.isHasMAC() ? "DensoTable1DHeaderMacBE" : "DensoTable1DHeaderNoMacBE";
     }
 
-    private static StructureDataType buildHeaderStruct(DensoTable table) {
+    /**
+     * Builds the header structure as the ECU's lookup code reads it, so the
+     * decompiler shows field accesses without casts. The type code is the one
+     * byte the lookups test; the rest of its 4-byte (2-D) or 2-byte (1-D) slot
+     * is zero. The axis pointers point to floats. The data pointer stays
+     * untyped because its element type varies from table to table.
+     */
+    static StructureDataType buildHeaderStruct(DensoTable table) {
         String name = headerStructName(table);
         StructureDataType s = new StructureDataType(CategoryPath.ROOT, name, 0);
 
-        Pointer32DataType ptr32 = new Pointer32DataType();
+        Pointer32DataType axisPtr = new Pointer32DataType(FloatDataType.dataType);
+        Pointer32DataType dataPtr = new Pointer32DataType();
         if (table.is2D()) {
-            s.add(ShortDataType.dataType,  2, "countX",    "Number of X-axis entries");
-            s.add(ShortDataType.dataType,  2, "countY",    "Number of Y-axis entries");
-            s.add(ptr32,                   4, "ptrX",      "Pointer to X-axis float array");
-            s.add(ptr32,                   4, "ptrY",      "Pointer to Y-axis float array");
-            s.add(ptr32,                   4, "ptrZ",      "Pointer to Z-data array");
-            s.add(DWordDataType.dataType,  4, "tableType", "Data type code (little-endian)");
+            s.add(ShortDataType.dataType,      2, "countX",    "Number of X-axis entries");
+            s.add(ShortDataType.dataType,      2, "countY",    "Number of Y-axis entries");
+            s.add(axisPtr,                     4, "ptrX",      "Pointer to X-axis float array");
+            s.add(axisPtr,                     4, "ptrY",      "Pointer to Y-axis float array");
+            s.add(dataPtr,                     4, "ptrZ",      "Pointer to Z-data array");
+            s.add(SignedByteDataType.dataType, 1, "tableType", TYPE_CODE_COMMENT);
+            s.add(new ArrayDataType(ByteDataType.dataType, 3, 1), 3, "reserved", "Always zero");
         } else {
-            s.add(ShortDataType.dataType,  2, "countX",    "Number of entries");
-            s.add(ShortDataType.dataType,  2, "tableType", "Data type code (little-endian)");
-            s.add(ptr32,                   4, "ptrX",      "Pointer to X-axis float array");
-            s.add(ptr32,                   4, "ptrY",      "Pointer to Y-data array");
+            s.add(ShortDataType.dataType,      2, "countX",    "Number of entries");
+            s.add(SignedByteDataType.dataType, 1, "tableType", TYPE_CODE_COMMENT);
+            s.add(ByteDataType.dataType,       1, "reserved",  "Always zero");
+            s.add(axisPtr,                     4, "ptrX",      "Pointer to X-axis float array");
+            s.add(dataPtr,                     4, "ptrY",      "Pointer to Y-data array");
         }
 
         if (table.isHasMAC()) {
