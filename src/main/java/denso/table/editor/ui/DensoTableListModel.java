@@ -116,7 +116,7 @@ public class DensoTableListModel extends ThreadedTableModelStub<DensoTable> {
         @Override public String getColumnName() { return "Data Type"; }
         @Override public String getValue(DensoTable row, Settings s, Object data,
                 ServiceProvider sp) {
-            return row.getDataType().getDisplayName();
+            return row.getDataTypeLabel();
         }
         @Override public int getColumnPreferredWidth() { return 80; }
     }

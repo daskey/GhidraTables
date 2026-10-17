@@ -33,14 +33,41 @@ public class DensoTableTest {
     }
 
     @Test
-    public void validateMacParametersRejectsImplausibleValues() {
+    public void isValidFloatUsesScoobyRomRange() {
+        assertTrue(DensoTable.isValidFloat(0f));
+        assertTrue(DensoTable.isValidFloat(-0f));
+        assertTrue(DensoTable.isValidFloat(1e-12f));
+        assertTrue(DensoTable.isValidFloat(-1e12f));
+        assertTrue(DensoTable.isValidFloat(9.536743e-7f));
+        assertFalse(DensoTable.isValidFloat(1e-13f));
+        assertFalse(DensoTable.isValidFloat(1e13f));
+        assertFalse(DensoTable.isValidFloat(Float.MIN_VALUE));
+        assertFalse(DensoTable.isValidFloat(Float.NaN));
+        assertFalse(DensoTable.isValidFloat(Float.NEGATIVE_INFINITY));
+    }
+
+    @Test
+    public void validateMacParametersMatchesScannerRule() {
         assertNull(DensoTable.validateMacParameters(0.01f, -40f));
         assertNull(DensoTable.validateMacParameters(-0.5f, 0f));
+        assertNull(DensoTable.validateMacParameters(1e-9f, 0f));
+        assertNull(DensoTable.validateMacParameters(1e7f, 0f));
         assertNotNull(DensoTable.validateMacParameters(0f, 0f));
-        assertNotNull(DensoTable.validateMacParameters(1e-9f, 0f));
-        assertNotNull(DensoTable.validateMacParameters(1e7f, 0f));
+        assertNotNull(DensoTable.validateMacParameters(1e-13f, 0f));
+        assertNotNull(DensoTable.validateMacParameters(1e13f, 0f));
         assertNotNull(DensoTable.validateMacParameters(Float.NaN, 0f));
+        assertNotNull(DensoTable.validateMacParameters(1f, 1e-13f));
         assertNotNull(DensoTable.validateMacParameters(1f, Float.POSITIVE_INFINITY));
+    }
+
+    @Test
+    public void inferredTypeIsMarkedAndCopied() {
+        DensoTable1D t = new DensoTable1D();
+        t.setDataType(DensoTableType.UINT16);
+        assertEquals("UInt16", t.getDataTypeLabel());
+        t.setTypeInferred(true);
+        assertEquals("UInt16?", t.getDataTypeLabel());
+        assertTrue(t.copy().isTypeInferred());
     }
 
     @Test
