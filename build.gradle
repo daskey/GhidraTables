@@ -34,9 +34,11 @@ else {
 
 repositories {
 	mavenCentral()
+	maven { url 'https://maven.jzy3d.org/releases/' }
 }
 
 dependencies {
+	implementation 'org.jzy3d:jzy3d-emul-gl-awt:2.2.1'
 	testImplementation 'junit:junit:4.13.2'
 }
 
@@ -51,4 +53,5 @@ test {
 
 buildExtension.configure {
 	exclude '.claude/**'
+	exclude 'lib/*-tests.jar'
 }
