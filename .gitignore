@@ -3,6 +3,7 @@
 /bin/
 /build/
 /dist/
+/lib/
 .classpath
 .idea/
 *.iml

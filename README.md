@@ -18,6 +18,7 @@ Use it as an accelerator for analysis, not as a substitute for understanding the
 - Scan loaded ROMs for 1D and 2D Denso table headers
 - Browse discovered tables in a filterable list
 - Open a heat-map editor with multi-cell editing
+- View a table as a read-only 3D surface
 - Write changes back to the loaded program
 - Apply Ghidra data structures at detected table addresses
 
@@ -34,7 +35,7 @@ The packaged extension zip is written to `dist/`. Install that zip through Ghidr
 
 Unit tests for the table model run with `.\gradlew test` (same `GHIDRA_INSTALL_DIR` requirement).
 
-The `Build and test` GitHub Actions workflow runs the tests and `buildExtension` on pushes to `main` and `dev`, on pull requests, and on demand. The built extension zip is attached to each run as the `GhidraTables-ghidra-11.4.2` artifact.
+The `Build and test` GitHub Actions workflow runs the tests and `buildExtension` on pushes to `main`, on pull requests, and on demand. The built extension zip is attached to each run as the `GhidraTables-ghidra-11.4.2` artifact.
 
 ## Basic Workflow
 
@@ -116,6 +117,7 @@ This is useful for quick local shaping without typing values manually.
 - `Revert` reloads the table from ROM and clears the undo history.
 - `Actions` exposes `Export CSV` and `Apply Structure`. CSV exports include the axis breakpoints: 2D tables get the X axis as the header row and the Y axis as the first column.
 - `Inspector` toggles the right-hand info pane.
+- `3D` switches the grid to a read-only surface view of the table (drag to rotate, scroll to zoom). It is rendered in pure Java with [jzy3d](https://www.jzy3d.org/), which the extension bundles; the chart is created the first time the view is opened.
 - Opening a table that already has an editor window brings that window to the front instead of opening a second copy.
 - Editor windows close with their program. Ghidra asks before closing a program or the tool while an editor has unsaved edits.
 

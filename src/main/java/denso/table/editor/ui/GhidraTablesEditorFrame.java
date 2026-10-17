@@ -127,6 +127,15 @@ public class GhidraTablesEditorFrame extends JFrame {
     private JComboBox<TableDensity> densityCombo;
     private JComboBox<OperationAxis> axisCombo;
 
+    // 3D view: the chart is created the first time the view is shown
+    private Surface3DPanel surface3DPanel;
+    private JToggleButton view3DToggle;
+    private JPanel viewCards;
+    private CardLayout viewCardLayout;
+    private boolean showing3D = false;
+    private static final String CARD_GRID = "grid";
+    private static final String CARD_3D = "3d";
+
     private JTextField multField;
     private JTextField offField;
     private JTextArea macExprLabel;
@@ -325,6 +334,10 @@ public class GhidraTablesEditorFrame extends JFrame {
         axisCombo.setFont(UI_FONT_SMALL);
         axisCombo.setToolTipText("Operation axis");
 
+        view3DToggle = makeToolbarToggle("3D",
+                "Toggle 3D surface view (read-only)", false);
+        view3DToggle.addActionListener(e -> setView3D(view3DToggle.isSelected()));
+
         inspectorToggle = makeToolbarToggle("Inspector",
                 "Show or hide the inspector panel", true);
         inspectorToggle.addActionListener(e -> setInspectorVisible(inspectorToggle.isSelected()));
@@ -333,6 +346,7 @@ public class GhidraTablesEditorFrame extends JFrame {
         if (table.is2D()) {
             rightGroup.add(makeToolbarControl("Axis", axisCombo));
         }
+        rightGroup.add(view3DToggle);
         rightGroup.add(inspectorToggle);
         rightGroup.add(makeSeparator());
 
@@ -482,12 +496,17 @@ public class GhidraTablesEditorFrame extends JFrame {
 
         workspace.add(tableWithOverlay, BorderLayout.CENTER);
 
+        // Wrap in a CardLayout so we can toggle between grid and 3D view
+        viewCardLayout = new CardLayout();
+        viewCards = new JPanel(viewCardLayout);
+        viewCards.add(workspace, CARD_GRID);
+
         inspectorScrollPane = new JScrollPane(buildInspectorPanel());
         inspectorScrollPane.setBorder(BorderFactory.createEmptyBorder());
         inspectorScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         inspectorScrollPane.getViewport().setBackground(GhidraTheme.surfaceBackground());
 
-        splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, workspace, inspectorScrollPane);
+        splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, viewCards, inspectorScrollPane);
         splitPane.setBorder(BorderFactory.createEmptyBorder());
         splitPane.setResizeWeight(1.0);
         splitPane.setContinuousLayout(true);
@@ -865,6 +884,9 @@ public class GhidraTablesEditorFrame extends JFrame {
             refreshHeatRange();
             if (!loading) markDataDirty();
             updateTableStats();
+            if (showing3D && surface3DPanel != null) {
+                surface3DPanel.refresh(table);
+            }
         });
 
         // ── Scroll wheel: adjust selected data cells ──────────────────────────
@@ -1641,6 +1663,27 @@ public class GhidraTablesEditorFrame extends JFrame {
         }
     }
 
+    private void setView3D(boolean show3D) {
+        if (show3D && !finishCellEdit("showing the 3D view")) {
+            view3DToggle.setSelected(showing3D);
+            return;
+        }
+        this.showing3D = show3D;
+        if (viewCardLayout != null && viewCards != null) {
+            if (show3D) {
+                if (surface3DPanel == null) {
+                    surface3DPanel = new Surface3DPanel();
+                    viewCards.add(surface3DPanel, CARD_3D);
+                }
+                surface3DPanel.refresh(table);
+            }
+            viewCardLayout.show(viewCards, show3D ? CARD_3D : CARD_GRID);
+        }
+        if (view3DToggle != null && view3DToggle.isSelected() != show3D) {
+            view3DToggle.setSelected(show3D);
+        }
+    }
+
     private void refreshHeatRange() {
         double min = Double.POSITIVE_INFINITY;
         double max = Double.NEGATIVE_INFINITY;
@@ -2410,6 +2453,12 @@ public class GhidraTablesEditorFrame extends JFrame {
             if (choice != JOptionPane.YES_OPTION) return;
         }
         dispose();
+    }
+
+    @Override
+    public void dispose() {
+        if (surface3DPanel != null) surface3DPanel.dispose();
+        super.dispose();
     }
 
     private void markDataDirty() {
